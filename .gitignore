@@ -1,0 +1,14 @@
+.superpowers/
+node_modules/
+frontend/dist/
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+*.log
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/

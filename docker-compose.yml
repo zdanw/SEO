@@ -1,0 +1,62 @@
+version: "3.9"
+
+services:
+  # ========== PostgreSQL + TimescaleDB（时序数据库）==========
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: seo-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: seo_platform
+      POSTGRES_USER: seo
+      POSTGRES_PASSWORD: seo_dev_pass
+      TZ: Asia/Shanghai
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U seo -d seo_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ========== Redis（Celery Broker + Cache）==========
+  redis:
+    image: redis:7-alpine
+    container_name: seo-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass ""
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - redisdata:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
