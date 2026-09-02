@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     PAGESPEED_TIMEOUT: int = 90
     PAGESPEED_STRATEGY: str = "mobile"  # mobile | desktop
 
+    # Reddit OAuth（Reddit 运营模块）
+    REDDIT_CLIENT_ID: Optional[str] = None
+    REDDIT_CLIENT_SECRET: Optional[str] = None
+    REDDIT_REDIRECT_URI: str = "http://127.0.0.1:8000/api/v1/reddit/oauth/callback"
+    REDDIT_USER_AGENT: str = "SEOPlatform/1.0"
+
     @property
     def is_dev(self) -> bool:
         return self.APP_ENV.lower() in ("dev", "development", "local")
