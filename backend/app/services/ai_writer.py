@@ -115,6 +115,52 @@ SOCIAL_PROMPT_TEMPLATE = """基于以下文章，为 {platform} 平台生成 1 �
 {{"title": "<文案标题>", "summary": "<文案正文>", "hashtags": ["#标签1", "#标签2"]}}
 """
 
+REDDIT_CONSULTATION_PROMPT = """Write a Reddit post for r/{subreddit} as a genuine user asking for advice.
+
+Topic/keyword: {keyword}
+
+Requirements:
+- English, first-person, authentic question tone
+- Title: engaging, under 300 characters, sounds like a real Reddit post
+- Body: 100-250 words, invite discussion
+- NO links, NO product promotion, NO marketing language
+- Match the subreddit culture
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_EXPERIENCE_PROMPT = """Write a Reddit post for r/{subreddit} sharing personal experience.
+
+Topic/keyword: {keyword}
+{site_line}
+
+Requirements:
+- English, first-person storytelling
+- Title: under 300 characters
+- Body: 150-350 words, mention 1-2 specific products naturally from personal use
+- Avoid hard-sell; sound like a helpful community member
+- If site URL provided, mention it softly at the end as "full comparison/write-up"
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_COMMENT_PROMPT = """You are a real Reddit user commenting on this post in r/{subreddit}:
+
+Title: {post_title}
+Post: {post_body}
+
+{site_line}
+
+Write ONE comment in English, 50-120 words:
+- Sound human: specific details, personal experience, or a thoughtful follow-up question
+- Avoid hard-sell; do not sound like marketing
+- If site URL provided, mention only if genuinely relevant
+
+Output the comment text only, no prefix or quotes.
+"""
+
 
 # ============ 客户端 ============
 class DeepSeekClient:
@@ -257,6 +303,54 @@ class DeepSeekClient:
             )
         except (json.JSONDecodeError, ValueError) as e:
             raise DeepSeekError(f"社交文案 JSON 解析失败: {e}; raw={raw[:300]}") from e
+
+    def generate_reddit_post(
+        self,
+        post_type: str,
+        subreddit: str,
+        keyword: str,
+        site_url: str | None = None,
+    ) -> dict[str, str]:
+        """Generate Reddit consultation or experience post (English)."""
+        sr = subreddit.removeprefix("r/").strip()
+        if post_type == "consultation":
+            prompt = REDDIT_CONSULTATION_PROMPT.format(subreddit=sr, keyword=keyword)
+        else:
+            site_line = f"Site URL to soft-mention if natural: {site_url}" if site_url else "Do not include any links."
+            prompt = REDDIT_EXPERIENCE_PROMPT.format(
+                subreddit=sr, keyword=keyword, site_line=site_line
+            )
+        raw = self.chat(prompt, temperature=0.85, max_tokens=800)
+        try:
+            obj = json.loads(_extract_json(raw))
+            return {
+                "title": str(obj.get("title", keyword))[:300],
+                "body": str(obj.get("body", "")),
+            }
+        except (json.JSONDecodeError, ValueError) as e:
+            raise DeepSeekError(f"Reddit post JSON parse failed: {e}; raw={raw[:300]}") from e
+
+    def generate_reddit_comment(
+        self,
+        post_title: str,
+        post_body: str,
+        subreddit: str,
+        site_url: str | None = None,
+    ) -> str:
+        """Generate a contextual Reddit comment (English)."""
+        sr = subreddit.removeprefix("r/").strip()
+        site_line = (
+            f"You may softly reference this site if relevant: {site_url}"
+            if site_url
+            else "Do not include links."
+        )
+        prompt = REDDIT_COMMENT_PROMPT.format(
+            subreddit=sr,
+            post_title=post_title[:500],
+            post_body=(post_body or "")[:1500],
+            site_line=site_line,
+        )
+        return self.chat(prompt, temperature=0.85, max_tokens=250).strip()
 
 
 # ============ 工具函数 ============

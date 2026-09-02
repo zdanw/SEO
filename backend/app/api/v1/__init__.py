@@ -13,6 +13,7 @@ from app.api.v1.competitors import router as competitors_router
 from app.api.v1.dashboard import router as dashboard_router
 from app.api.v1.gsc import router as gsc_router
 from app.api.v1.reports import router as reports_router
+from app.api.v1.reddit import router as reddit_router
 
 api = APIRouter()
 
@@ -29,3 +30,4 @@ api.include_router(competitors_router, prefix="/competitors", tags=["竞品对�
 api.include_router(dashboard_router, prefix="/dashboard", tags=["数据大屏"])
 api.include_router(gsc_router, prefix="/gsc", tags=["Search Console"])
 api.include_router(reports_router, prefix="/reports", tags=["SEO 报告"])
+api.include_router(reddit_router, prefix="/reddit", tags=["Reddit 运营"])

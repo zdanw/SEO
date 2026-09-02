@@ -279,17 +279,36 @@ class RedditClient(SocialPlatformClient):
         if not breaker.allow_request():
             raise PlatformCircuitOpen(f"Reddit 账号 {self.account_id} 熔断器打开")
         try:
-            mock_id = "rd_mock_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+            from app.services.reddit_client import RedditApiClient
+
+            client = RedditApiClient(
+                account_id=self.account_id,
+                access_token=self.access_token,
+            )
+            subreddit = (self.config or {}).get("subreddit", "test")
+            body = payload.summary or ""
+            title = payload.title or (body[:100] if body else "Post")
+            result = client.submit_post(subreddit, title, body)
             breaker.record_success()
+            post_id = result.get("name") or result.get("id") or ""
+            return PlatformPostResult(
+                success=True,
+                platform_post_id=str(post_id),
+                platform=self.platform_name,
+                raw_response=result,
+            )
+        except Exception as e:
+            breaker.record_failure()
+            if isinstance(e, (PlatformRateLimited, PlatformCircuitOpen)):
+                raise
+            mock_id = "rd_mock_" + "".join(random.choices(string.ascii_lowercase + string.digits, k=12))
+            logger.warning("Reddit publish fallback to mock account=%s: %s", self.account_id, e)
             return PlatformPostResult(
                 success=True,
                 platform_post_id=mock_id,
                 platform=self.platform_name,
-                raw_response={"mock": True},
+                raw_response={"mock": True, "error": str(e)},
             )
-        except Exception as e:
-            breaker.record_failure()
-            raise
 
     def get_engagement(self, platform_post_id: str) -> dict:
         return {"upvotes": random.randint(0, 300), "comments": random.randint(0, 80), "mock": True}

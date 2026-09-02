@@ -151,6 +151,11 @@
         </el-card>
       </el-tab-pane>
 
+      <!-- ============ Tab 5: Reddit 运营 ============ -->
+      <el-tab-pane label="Reddit 运营" name="reddit">
+        <RedditOperations />
+      </el-tab-pane>
+
       <!-- ============ Tab 4: 社区互动 ============ -->
       <el-tab-pane label="社区互动" name="community">
         <el-card shadow="never">
@@ -281,6 +286,7 @@ import {
   type CommunityCommentsResponse,
 } from '@/api/social'
 import { listArticles, type Article } from '@/api/articles'
+import RedditOperations from '@/components/RedditOperations.vue'
 
 const activeTab = ref('accounts')
 const accounts = ref<SocialAccount[]>([])
