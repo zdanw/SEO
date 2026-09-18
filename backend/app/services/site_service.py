@@ -4,15 +4,19 @@ from sqlalchemy.orm import Session
 
 from app.models.client_site import ClientSite
 from app.models.site_member import SiteMember
-from app.models.article import Article, InternalLink
-from app.models.backlink import Backlink
-from app.models.competitor import Competitor
-from app.models.gsc_connection import GscConnection
 from app.models.keyword import Keyword
-from app.models.recommendation import Recommendation
-from app.models.seo_audit import SeoAudit, SeoAuditPage
-from app.models.serp_rank import CompetitorRankSnapshot, SerpRankSnapshot
+from app.models.serp_rank import SerpRankSnapshot
 from app.models.social import SocialAccount, SocialPost
+from app.models.reddit import (
+    RedditAccountProfile,
+    RedditBrand,
+    RedditComment,
+    RedditCommunity,
+    RedditKeyword,
+    RedditPost,
+    RedditPostMetric,
+    RedditProduct,
+)
 
 
 def ensure_default_site(db: Session, user_id: int) -> tuple[ClientSite, SiteMember]:
@@ -40,70 +44,59 @@ def ensure_default_site(db: Session, user_id: int) -> tuple[ClientSite, SiteMemb
 
 def delete_client_site(db: Session, site_id: int) -> None:
     """删除客户站点及其全部关联数据。"""
-
     keyword_ids = [
         row[0]
         for row in db.query(Keyword.id).filter(Keyword.site_id == site_id).all()
-    ]
-    competitor_ids = [
-        row[0]
-        for row in db.query(Competitor.id).filter(Competitor.site_id == site_id).all()
-    ]
-    article_ids = [
-        row[0]
-        for row in db.query(Article.id).filter(Article.site_id == site_id).all()
-    ]
-    audit_ids = [
-        row[0]
-        for row in db.query(SeoAudit.id).filter(SeoAudit.site_id == site_id).all()
     ]
     account_ids = [
         row[0]
         for row in db.query(SocialAccount.id).filter(SocialAccount.site_id == site_id).all()
     ]
 
+    post_ids = [
+        row[0] for row in db.query(RedditPost.id).filter(RedditPost.site_id == site_id).all()
+    ]
+    if post_ids:
+        db.query(RedditPostMetric).filter(RedditPostMetric.post_id.in_(post_ids)).delete(
+            synchronize_session=False
+        )
+    db.query(RedditPost).filter(RedditPost.site_id == site_id).delete(synchronize_session=False)
+    db.query(RedditComment).filter(RedditComment.site_id == site_id).delete(
+        synchronize_session=False
+    )
+    db.query(RedditAccountProfile).filter(RedditAccountProfile.site_id == site_id).delete(
+        synchronize_session=False
+    )
+    db.query(RedditCommunity).filter(RedditCommunity.site_id == site_id).delete(
+        synchronize_session=False
+    )
+    db.query(RedditKeyword).filter(RedditKeyword.site_id == site_id).delete(
+        synchronize_session=False
+    )
+    brand_ids = [
+        r[0]
+        for r in db.query(RedditBrand.id).filter(RedditBrand.site_id == site_id).all()
+    ]
+    if brand_ids:
+        db.query(RedditProduct).filter(RedditProduct.brand_id.in_(brand_ids)).delete(
+            synchronize_session=False
+        )
+    db.query(RedditBrand).filter(RedditBrand.site_id == site_id).delete(
+        synchronize_session=False
+    )
+
     if keyword_ids:
         db.query(SerpRankSnapshot).filter(
             SerpRankSnapshot.keyword_id.in_(keyword_ids)
         ).delete(synchronize_session=False)
-        db.query(CompetitorRankSnapshot).filter(
-            CompetitorRankSnapshot.keyword_id.in_(keyword_ids)
-        ).delete(synchronize_session=False)
-    if competitor_ids:
-        db.query(CompetitorRankSnapshot).filter(
-            CompetitorRankSnapshot.competitor_id.in_(competitor_ids)
-        ).delete(synchronize_session=False)
-
-    if audit_ids:
-        db.query(SeoAuditPage).filter(SeoAuditPage.audit_id.in_(audit_ids)).delete(
-            synchronize_session=False
-        )
-        db.query(SeoAudit).filter(SeoAudit.id.in_(audit_ids)).delete(synchronize_session=False)
 
     if account_ids:
         db.query(SocialPost).filter(SocialPost.account_id.in_(account_ids)).delete(
             synchronize_session=False
         )
-    if article_ids:
-        db.query(SocialPost).filter(SocialPost.article_id.in_(article_ids)).delete(
-            synchronize_session=False
-        )
-        db.query(InternalLink).filter(
-            InternalLink.source_article_id.in_(article_ids)
-            | InternalLink.target_article_id.in_(article_ids)
-        ).delete(synchronize_session=False)
 
-    db.query(Recommendation).filter(Recommendation.site_id == site_id).delete(
-        synchronize_session=False
-    )
-    db.query(Article).filter(Article.site_id == site_id).delete(synchronize_session=False)
-    db.query(Backlink).filter(Backlink.site_id == site_id).delete(synchronize_session=False)
-    db.query(Competitor).filter(Competitor.site_id == site_id).delete(synchronize_session=False)
     db.query(Keyword).filter(Keyword.site_id == site_id).delete(synchronize_session=False)
     db.query(SocialAccount).filter(SocialAccount.site_id == site_id).delete(
-        synchronize_session=False
-    )
-    db.query(GscConnection).filter(GscConnection.site_id == site_id).delete(
         synchronize_session=False
     )
 

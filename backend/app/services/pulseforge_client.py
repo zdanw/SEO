@@ -279,11 +279,15 @@ class RedditClient(SocialPlatformClient):
         if not breaker.allow_request():
             raise PlatformCircuitOpen(f"Reddit 账号 {self.account_id} 熔断器打开")
         try:
-            from app.services.reddit_client import RedditApiClient
+            from app.services.reddit_client import RedditApiClient, resolve_zernio_api_credentials
 
+            api_key, profile_id = resolve_zernio_api_credentials(self.config)
             client = RedditApiClient(
                 account_id=self.account_id,
+                zernio_account_id=(self.config or {}).get("zernio_account_id"),
                 access_token=self.access_token,
+                api_key=api_key,
+                profile_id=profile_id,
             )
             subreddit = (self.config or {}).get("subreddit", "test")
             body = payload.summary or ""

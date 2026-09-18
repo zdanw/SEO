@@ -13,8 +13,7 @@ from datetime import datetime
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models.keyword import Keyword
-from app.models.competitor import Competitor
-from app.models.serp_rank import SerpRankSnapshot, CompetitorRankSnapshot
+from app.models.serp_rank import SerpRankSnapshot
 from app.services.serp_crawler import get_serp_crawler, SerpCrawlError, SerpBlockedError
 from app.utils.rate_limiter import RateLimitExceeded, CircuitBreakerOpen
 from app.utils.proxy import get_proxy_pool
@@ -42,17 +41,12 @@ def crawl_keyword_rank(self, keyword_id: int) -> dict:
         if not kw or kw.status != "active":
             return {"success": False, "error": f"keyword {keyword_id} not found/inactive"}
 
-        # 取该用户的所有竞品
-        competitors = db.query(Competitor).filter(Competitor.user_id == kw.user_id).all()
-        competitor_domains = [c.domain for c in competitors]
-
         crawler = get_serp_crawler()
         try:
             result = crawler.crawl(
                 keyword=kw.keyword,
                 target_url=kw.target_url,
                 region=kw.region,
-                competitor_domains=competitor_domains,
             )
         except (RateLimitExceeded, CircuitBreakerOpen) as e:
             logger.warning("SERP %s 限流/熔断，将重试: %s", kw.keyword, e)
@@ -74,21 +68,6 @@ def crawl_keyword_rank(self, keyword_id: int) -> dict:
             error_message=result.error_message,
         )
         db.add(snapshot)
-
-        # 写入竞品排名（P3.7）
-        comp_ranks = result.serp_features.get("competitor_ranks", {})
-        for comp in competitors:
-            if comp.domain in comp_ranks:
-                info = comp_ranks[comp.domain]
-                db.add(CompetitorRankSnapshot(
-                    time=now,
-                    competitor_id=comp.id,
-                    keyword_id=kw.id,
-                    domain=comp.domain,
-                    rank=info["rank"],
-                    target_url=info["url"],
-                ))
-
         db.commit()
         logger.info(
             "SERP 抓取 %s rank=%s status=%s",

@@ -11,6 +11,7 @@ celery_app = Celery(
         "app.tasks.serp_tasks",
         "app.tasks.social_tasks",
         "app.tasks.alert_tasks",
+        "app.tasks.reddit_tasks",
     ],
 )
 
@@ -28,6 +29,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.serp_*": {"queue": "serp"},
         "app.tasks.social_*": {"queue": "social"},
+        "app.tasks.reddit_*": {"queue": "social"},
     },
     beat_schedule={
         # 每 6 小时全量抓取 SERP
@@ -40,15 +42,30 @@ celery_app.conf.update(
             "task": "app.tasks.alert_tasks.check_serp_failures",
             "schedule": crontab(minute=30, hour=9),
         },
-        # 每周一 03:00 全量外链检测
-        "check-backlinks": {
-            "task": "app.tasks.alert_tasks.check_backlinks_health",
-            "schedule": crontab(minute=0, hour=3, day_of_week=1),
-        },
         # 每 30 分钟代理池健康检测
         "proxy-health-check": {
             "task": "app.tasks.serp_tasks.proxy_health_check",
             "schedule": crontab(minute="*/30"),
+        },
+        # Reddit：每 15 分钟发布到期的定时帖子/评论
+        "reddit-publish-scheduled": {
+            "task": "app.tasks.reddit_tasks.publish_scheduled_reddit_content",
+            "schedule": crontab(minute="*/15"),
+        },
+        # Reddit：每日 08:00 汇总已发布帖子互动数据
+        "reddit-sync-post-metrics": {
+            "task": "app.tasks.reddit_tasks.sync_reddit_post_metrics",
+            "schedule": crontab(minute=0, hour=8),
+        },
+        # Reddit：每日 09:00 账号健康检查与风控预警
+        "reddit-account-health": {
+            "task": "app.tasks.reddit_tasks.reddit_account_health_check",
+            "schedule": crontab(minute=0, hour=9),
+        },
+        # Reddit：每 3 小时智能发现讨论并入待审队列
+        "reddit-smart-discover": {
+            "task": "app.tasks.reddit_tasks.discover_reddit_discussions",
+            "schedule": crontab(minute=20, hour="*/3"),
         },
     },
 )

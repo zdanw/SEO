@@ -139,7 +139,7 @@
 import { ref, computed, onMounted, onActivated, nextTick, watch, onBeforeUnmount } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
-import { listKeywords, createKeyword, deleteKeyword, type Keyword } from '@/api/articles'
+import { listKeywords, createKeyword, deleteKeyword, type Keyword } from '@/api/keywords'
 import {
   getLatestRanks,
   getTrends,

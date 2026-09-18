@@ -1,5 +1,5 @@
-"""社交分发 API：账号配置 + 发帖任务 CRUD + 联动触发 + 立即发送。"""
-from datetime import datetime, timedelta
+"""社交分发 API：账号配置 + 发帖任务 CRUD + 立即发送。"""
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
@@ -7,15 +7,11 @@ from sqlalchemy.orm import Session
 from app.api.deps import SiteContext, get_current_user, get_site_context, require_site_write
 from app.core.database import get_db
 from app.models.user import User
-from app.models.article import Article
 from app.models.social import SocialAccount, SocialPost
 from app.schemas.social import (
     SocialAccountCreate, SocialAccountUpdate, SocialAccountOut,
     SocialPostCreate, SocialPostUpdate, SocialPostOut,
-    AutoDistributeRequest, AutoDistributeResponse,
-    SocialPostSendNow,
 )
-from app.services.ai_writer import DeepSeekError, get_ai_client
 from app.services.pulseforge_client import (
     get_platform_client, PublishPayload, PlatformError,
 )
@@ -24,7 +20,13 @@ from app.tasks.social_tasks import send_post_task
 router = APIRouter()
 
 
-# ============ 账号配置 ============
+def _attach_account_fields(post: SocialPost) -> SocialPost:
+    if post.account:
+        post.platform = post.account.platform
+        post.account_name = post.account.account_name
+    return post
+
+
 @router.get("/accounts", response_model=list[SocialAccountOut], tags=["社交账号"])
 def list_accounts(
     db: Session = Depends(get_db),
@@ -90,12 +92,10 @@ def delete_account(
     db.commit()
 
 
-# ============ 发帖任务 ============
 @router.get("/posts", response_model=list[SocialPostOut], tags=["发帖任务"])
 def list_posts(
     status_filter: str | None = Query(default=None, alias="status"),
     account_id: int | None = None,
-    article_id: int | None = None,
     page: int = Query(default=1, ge=1),
     size: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
@@ -110,30 +110,14 @@ def list_posts(
         q = q.filter(SocialPost.status == status_filter)
     if account_id:
         q = q.filter(SocialPost.account_id == account_id)
-    if article_id:
-        q = q.filter(SocialPost.article_id == article_id)
     posts = (
         q.order_by(SocialPost.created_at.desc())
         .offset((page - 1) * size)
         .limit(size)
         .all()
     )
-    # 填充冗余展示字段（SocialPostOut 需要 platform / account_name / article_title）
-    article_ids = {p.article_id for p in posts if p.article_id}
-    article_titles: dict[int, str] = {}
-    if article_ids:
-        article_titles = {
-            a.id: a.title
-            for a in db.query(Article.id, Article.title)
-            .filter(Article.id.in_(article_ids))
-            .all()
-        }
     for p in posts:
-        if p.account:
-            p.platform = p.account.platform
-            p.account_name = p.account.account_name
-        if p.article_id:
-            p.article_title = article_titles.get(p.article_id)
+        _attach_account_fields(p)
     return posts
 
 
@@ -143,7 +127,6 @@ def create_post(
     db: Session = Depends(get_db),
     ctx: SiteContext = Depends(require_site_write),
 ) -> SocialPost:
-    # 验证账号归属
     acc = (
         db.query(SocialAccount)
         .filter(SocialAccount.id == payload.account_id, SocialAccount.site_id == ctx.site.id)
@@ -158,10 +141,9 @@ def create_post(
     db.commit()
     db.refresh(post)
 
-    # 如果是定时任务，投递到 Celery
     if post.scheduled_at:
         send_post_task.apply_async(args=[post.id], eta=post.scheduled_at)
-    return post
+    return _attach_account_fields(post)
 
 
 @router.patch("/posts/{post_id}", response_model=SocialPostOut, tags=["发帖任务"])
@@ -185,7 +167,7 @@ def update_post(
         setattr(post, k, v)
     db.commit()
     db.refresh(post)
-    return post
+    return _attach_account_fields(post)
 
 
 @router.delete("/posts/{post_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["发帖任务"])
@@ -212,9 +194,9 @@ def delete_post(
 def send_now(
     post_id: int,
     db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
     current_user: User = Depends(get_current_user),
 ) -> SocialPost:
-    """立即发送（同步执行，不等 Celery）。"""
     post = (
         db.query(SocialPost)
         .join(SocialAccount, SocialPost.account_id == SocialAccount.id)
@@ -255,125 +237,4 @@ def send_now(
         post.retry_count += 1
     db.commit()
     db.refresh(post)
-    # 填充展示字段
-    if post.account:
-        post.platform = post.account.platform
-        post.account_name = post.account.account_name
-    if post.article_id:
-        article = db.query(Article.title).filter(Article.id == post.article_id).first()
-        post.article_title = article.title if article else None
-    return post
-
-
-# ============ 联动触发：文章发布时自动生成分发任务 ============
-@router.post("/auto-distribute", response_model=AutoDistributeResponse, tags=["联动触发"])
-def auto_distribute(
-    payload: AutoDistributeRequest,
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(require_site_write),
-) -> AutoDistributeResponse:
-    """文章发布时自动为每个激活的社交账号生成发帖任务。
-
-    流程：
-    1. 取文章 + 关键词
-    2. 取用户所有激活账号
-    3. 调用 AI 生成各平台差异化文案
-    4. 为每账号创建 SocialPost 记录（scheduled_at = now + delay_minutes）
-    5. 投递到 Celery 定时发送
-    """
-    article = (
-        db.query(Article)
-        .filter(Article.id == payload.article_id, Article.site_id == ctx.site.id)
-        .first()
-    )
-    if not article:
-        raise HTTPException(status_code=404, detail="文章不存在")
-
-    accounts = (
-        db.query(SocialAccount)
-        .filter(SocialAccount.site_id == ctx.site.id, SocialAccount.is_active == True)
-        .all()
-    )
-    if not accounts:
-        return AutoDistributeResponse(article_id=payload.article_id)
-
-    # 取关键词
-    keyword = ""
-    if article.keyword:
-        keyword = article.keyword.keyword
-
-    # AI 生成各平台文案
-    created_posts: list[SocialPost] = []
-    skipped: list[str] = []
-    schedule_time = datetime.utcnow() + timedelta(minutes=payload.delay_minutes)
-
-    try:
-        client = get_ai_client()
-    except DeepSeekError:
-        # AI 不可用，回退到通用摘要
-        client = None
-
-    for idx, acc in enumerate(accounts):
-        # 错峰：每账号延迟 5 分钟
-        eta = schedule_time + timedelta(minutes=idx * 5)
-        platform_label = _platform_label(acc.platform)
-
-        if client:
-            try:
-                copy = client.generate_social_copy(
-                    platform=platform_label,
-                    article_title=article.title,
-                    keyword=keyword or article.title,
-                    summary=(article.meta_description or (article.content or "")[:200]),
-                )
-                title = copy.title
-                summary = copy.summary
-                hashtags = copy.hashtags
-            except DeepSeekError:
-                title = article.title
-                summary = article.meta_description or (article.content or "")[:150]
-                hashtags = []
-        else:
-            title = article.title
-            summary = article.meta_description or (article.content or "")[:150]
-            hashtags = []
-
-        post = SocialPost(
-            article_id=article.id,
-            account_id=acc.id,
-            title=title,
-            summary=summary,
-            image_url=article.cover_image_url,
-            external_url=article.target_url,
-            hashtags=hashtags,
-            scheduled_at=eta,
-            status="scheduled",
-        )
-        db.add(post)
-        db.commit()
-        db.refresh(post)
-        # 填充展示字段
-        post.platform = acc.platform
-        post.account_name = acc.account_name
-        post.article_title = article.title
-        created_posts.append(post)
-
-        # 投递 Celery 定时任务
-        send_post_task.apply_async(args=[post.id], eta=eta)
-
-    return AutoDistributeResponse(
-        article_id=payload.article_id,
-        created_posts=created_posts,
-        skipped_accounts=skipped,
-    )
-
-
-def _platform_label(platform: str) -> str:
-    """数据库 platform -> AI  用的平台名。"""
-    return {
-        "pulseforge": "PulseForge",
-        "linkedin": "LinkedIn",
-        "twitter": "Twitter/X",
-        "facebook": "Facebook",
-        "reddit": "Reddit",
-    }.get(platform.lower(), platform)
+    return _attach_account_fields(post)

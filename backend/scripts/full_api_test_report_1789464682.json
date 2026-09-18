@@ -1,0 +1,975 @@
+{
+  "email": "fullapi_1789464682@example.com",
+  "site_id": 31,
+  "pass": 156,
+  "fail": 3,
+  "soft": 2,
+  "results": [
+    {
+      "name": "GET /api/health",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "旧 /api/v1 应 404",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "旧 /api/v2 应 404",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "POST /auth/register",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /auth/login",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /auth/me",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "无 token → 401",
+      "status": "PASS",
+      "code": 401,
+      "detail": ""
+    },
+    {
+      "name": "错误密码 → 401",
+      "status": "PASS",
+      "code": 401,
+      "detail": ""
+    },
+    {
+      "name": "非法邮箱 → 422",
+      "status": "PASS",
+      "code": 422,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /sites/31",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/members",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /sites/31/onboarding",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/init-status",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/init",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/baseline",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/command-center",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "站点不存在 → 404",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/topics",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/topics",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /topics/5",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /topics/5",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/topics",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /topics/5/children",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /topics/5/stats",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /topics/5/queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /topics/5/content-assets",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /topics/5/archive",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /topics/5",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/queries",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /queries/3",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /queries/3",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /queries/3/attach-topic",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /queries/3/observations",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /queries/3/content-assets",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/search/overview",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/content-assets",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/content-assets",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /content-assets/3",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /content-assets/3",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /content-assets/3/versions",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /content-assets/3/versions",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /content-assets/3/graph",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /content-assets/3/topics",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /content-assets/3/queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET versions for publish",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /content-assets/3/publish",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /content-assets/3/claims",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/research/projects",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/research/projects",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /research/projects/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /research/projects/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /research/projects/2/evidence",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /research/evidence/1",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /research/projects/2/complete",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/claims",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/claims",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /claims/1",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /claims/1",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /claims/1/evidence",
+      "status": "SOFT",
+      "code": 422,
+      "detail": "{\"detail\":[{\"type\":\"missing\",\"loc\":[\"body\",\"research_evidence_id\"],\"msg\":\"Field required\",\"input\":{\"evidence_id\":1}}]}"
+    },
+    {
+      "name": "GET /claims/1/publishability",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /claims/1/approve",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /claims/1/reject",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /content-assets/3/claims/1",
+      "status": "SOFT",
+      "code": 422,
+      "detail": "{\"error\":{\"code\":\"CLAIM_NOT_PUBLISHABLE\",\"message\":\"该 Claim 不可用于内容：claim 未批准\",\"request_id\":\"-\"}}"
+    },
+    {
+      "name": "POST /sites/31/ai-search/queries",
+      "status": "PASS",
+      "code": 201,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/ai-search/queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/ai-search/overview",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/ai-search/visibility",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/ai-search/citation-winners",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/ai-search/content-gaps",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/ai-search/query-matrix",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/ai-search/queries/import",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/ai-search/aggregate",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /ai-search/queries/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "PATCH /ai-search/queries/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /ai-search/queries/2/runs",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /ai-search/queries/2/runs/manual",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /ai-search/runs/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /ai-search/runs/2/results",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /ai-search/results/2/citations",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/gsc/metrics",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/gsc/top-pages",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/gsc/top-queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/gsc/sync",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/gsc/backfill",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/reddit/threads",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/reddit/opportunities",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/reddit/threads/collect",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /reddit/threads/999999",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "POST /reddit/threads/999999/score",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "GET /reddit/communities/999999/rules",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /reddit/communities/999999/rules/snapshot",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "POST /reddit/opportunities/999999/status",
+      "status": "PASS",
+      "code": 422,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/technical-audits",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/technical-audits",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "seed SearchObservation",
+      "status": "PASS",
+      "code": null,
+      "detail": ""
+    },
+    {
+      "name": "POST /sites/31/opportunities/build",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/opportunities",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /opportunities/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /opportunities/2/execute",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "execute task channel",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "POST /opportunities/2/resolve",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "GET /sites/31/experiments",
+      "status": "FAIL",
+      "code": 500,
+      "detail": "Traceback (most recent call last):\n  File \"C:\\Users\\gcbc\\anaconda3\\envs\\SEO\\Lib\\site-packages\\starlette\\middleware\\errors.py\", line 165, in __call__\n    await self.app(scope, receive, _send)\n  File \"C:\\Users\\gcbc\\anaconda3\\envs\\SEO\\Lib\\site-packages\\starlette\\middleware\\cors.py\", line 85, in __call__\n    await self.app(scope, receive, send)\n  File \"C:\\Users\\gcbc\\anaconda3\\envs\\SEO\\Lib\\site-package"
+    },
+    {
+      "name": "GET experiments (data)",
+      "status": "FAIL",
+      "code": 500,
+      "detail": "Traceback (most recent call last):\n  File \"C:\\Users\\gcbc\\anaconda3\\envs\\SEO\\Lib\\site-packages\\starlette\\middleware\\errors.py\", line 165, in __call__\n    await self.app(scope, receive, _send)\n  File \"C:\\Users\\gcbc\\anaconda3\\envs\\SEO\\Lib\\site-packages\\starlette\\middleware\\cors.py\", line 85, in __call__\n    await self.app(scope, receive, send)\n  File \"C:\\Users\\gcbc\\anaconda3\\envs\\SEO\\Lib\\site-package"
+    },
+    {
+      "name": "openapi.json",
+      "status": "PASS",
+      "code": null,
+      "detail": "paths=81"
+    },
+    {
+      "name": "probe GET /api/ai-search/queries/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/ai-search/results/2/citations",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/ai-search/runs/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/ai-search/runs/2/results",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/auth/me",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/claims/1",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/claims/1/publishability",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/content-assets/3",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/content-assets/3/claims",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/content-assets/3/graph",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/content-assets/3/versions",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/experiments/999999",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/health",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/opportunities/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/queries/3",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/queries/3/content-assets",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/queries/3/observations",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/reddit/communities/999999/rules",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/reddit/threads/999999",
+      "status": "PASS",
+      "code": 404,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/research/evidence/1",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/research/projects/2",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/ai-search/citation-winners",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/ai-search/content-gaps",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/ai-search/overview",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/ai-search/queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/ai-search/query-matrix",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/ai-search/visibility",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/baseline",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/claims",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/command-center",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/content-assets",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/experiments",
+      "status": "FAIL",
+      "code": 500,
+      "detail": "Traceback (most recent call last):\n  File \"C:\\Users\\gcbc\\anaconda3\\envs\\SEO\\Lib\\site-packages\\starlette\\middleware\\errors.py\", line 165, in __call__\n    await self.app(scope, receive, _send)\n  File \"C"
+    },
+    {
+      "name": "probe GET /api/sites/31/gsc/metrics",
+      "status": "PASS",
+      "code": 422,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/gsc/top-pages",
+      "status": "PASS",
+      "code": 422,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/gsc/top-queries",
+      "status": "PASS",
+      "code": 422,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/init-status",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/members",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/opportunities",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/reddit/opportunities",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/reddit/threads",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/research/projects",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/search/overview",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/technical-audits",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/sites/31/topics",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/topics/5",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/topics/5/children",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/topics/5/content-assets",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/topics/5/queries",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "probe GET /api/topics/5/stats",
+      "status": "PASS",
+      "code": 200,
+      "detail": ""
+    },
+    {
+      "name": "openapi GET probe count",
+      "status": "PASS",
+      "code": null,
+      "detail": "probed=52"
+    }
+  ]
+}

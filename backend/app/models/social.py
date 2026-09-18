@@ -38,9 +38,6 @@ class SocialPost(Base):
     __tablename__ = "social_posts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    article_id: Mapped[int | None] = mapped_column(
-        Integer, ForeignKey("articles.id"), nullable=True, index=True
-    )
     account_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("social_accounts.id"), nullable=False, index=True
     )

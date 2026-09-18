@@ -6,10 +6,9 @@ from app.api.deps import SiteContext, get_current_user, get_site_context, requir
 from app.core.database import get_db
 from app.models.user import User
 from app.models.keyword import Keyword
-from app.models.article import Article
-from app.models.recommendation import Recommendation
-from app.models.serp_rank import SerpRankSnapshot, CompetitorRankSnapshot
-from app.schemas.article import KeywordCreate, KeywordOut
+from app.models.serp_rank import SerpRankSnapshot
+from app.schemas.keyword import KeywordCreate, KeywordOut
+
 router = APIRouter()
 
 
@@ -54,10 +53,5 @@ def delete_keyword(
     if not kw:
         raise HTTPException(status_code=404, detail="关键词不存在")
     db.query(SerpRankSnapshot).filter(SerpRankSnapshot.keyword_id == keyword_id).delete()
-    db.query(CompetitorRankSnapshot).filter(CompetitorRankSnapshot.keyword_id == keyword_id).delete()
-    db.query(Article).filter(Article.keyword_id == keyword_id).update({Article.keyword_id: None})
-    db.query(Recommendation).filter(Recommendation.keyword_id == keyword_id).update(
-        {Recommendation.keyword_id: None}
-    )
     db.delete(kw)
     db.commit()

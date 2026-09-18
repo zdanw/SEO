@@ -1,4 +1,4 @@
-"""Test Reddit OAuth configuration and /reddit/oauth/start endpoint."""
+"""Check Zernio config and /reddit/oauth/start."""
 import os
 import sys
 
@@ -12,21 +12,25 @@ PASSWORD = os.environ.get("TEST_PASSWORD", "admin123")
 
 
 def main() -> None:
-    print("=== Reddit OAuth Test ===\n")
+    print("=== Zernio Reddit Connect Test ===\n")
 
     from app.core.config import settings
-    from app.services.reddit_client import is_reddit_configured
+    from app.core.database import SessionLocal
+    from app.services.zernio_keys import is_zernio_ready, list_enabled_keys
 
-    print(f"REDDIT_CLIENT_ID set: {bool(settings.REDDIT_CLIENT_ID)}")
-    print(f"REDDIT_CLIENT_SECRET set: {bool(settings.REDDIT_CLIENT_SECRET)}")
-    print(f"REDDIT_REDIRECT_URI: {settings.REDDIT_REDIRECT_URI}")
-    print(f"REDDIT_USER_AGENT: {settings.REDDIT_USER_AGENT}")
-    print(f"is_reddit_configured(): {is_reddit_configured()}\n")
+    print(f"ZERNIO_API_BASE: {settings.ZERNIO_API_BASE}")
+    db = SessionLocal()
+    try:
+        keys = list_enabled_keys(db)
+        print(f"enabled zernio_api_keys: {len(keys)}")
+        print(f"is_zernio_ready(db): {is_zernio_ready(db)}\n")
+    finally:
+        db.close()
 
     try:
         login = requests.post(
             f"{BASE}/auth/login",
-            data={"username": EMAIL, "password": PASSWORD},
+            json={"email": EMAIL, "password": PASSWORD},
             timeout=10,
         )
         login.raise_for_status()
@@ -37,15 +41,19 @@ def main() -> None:
         return
 
     try:
+        r = requests.get(f"{BASE}/reddit/status", headers=headers, timeout=10)
+        print(f"GET /reddit/status -> {r.status_code}")
+        print(r.text[:400])
+        print()
         r = requests.get(f"{BASE}/reddit/oauth/start", headers=headers, timeout=10)
         print(f"GET /reddit/oauth/start -> {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            print(f"auth_url prefix: {data.get('auth_url', '')[:80]}...")
-        else:
-            print(r.text[:300])
+        print(r.text[:400])
+        print()
+        r = requests.get(f"{BASE}/reddit/zernio-keys", headers=headers, timeout=10)
+        print(f"GET /reddit/zernio-keys -> {r.status_code}")
+        print(r.text[:400])
     except Exception as exc:
-        print(f"FAIL oauth start: {exc}")
+        print(f"FAIL reddit smoke: {exc}")
 
 
 if __name__ == "__main__":

@@ -67,8 +67,8 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  DataBoard, EditPen, Check, Share, TrendCharts,
-  Document, Link, Compass, Bell, UserFilled, Fold, Expand, Monitor,
+  DataBoard, Share, TrendCharts, Goods, User,
+  UserFilled, Fold, Expand,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -81,45 +81,28 @@ const menuGroups = [
     title: '工作台',
     items: [
       { path: '/dashboard', title: '综合大屏', icon: DataBoard },
-      { path: '/recommendations', title: '优化建议', icon: Bell },
     ],
   },
   {
-    title: '内容运营',
+    title: '运营与监控',
     items: [
-      { path: '/articles', title: '文章创作', icon: EditPen },
-      { path: '/seo-checker', title: 'SEO 检查', icon: Check },
       { path: '/social', title: '社交分发', icon: Share },
-    ],
-  },
-  {
-    title: '数据监控',
-    items: [
+      { path: '/accounts', title: '社交账号', icon: User },
+      { path: '/brands', title: '品牌产品库', icon: Goods },
       { path: '/serp', title: '排名监控', icon: TrendCharts },
-      { path: '/search-console', title: 'Search Console', icon: Monitor },
-      { path: '/backlinks', title: '外链监控', icon: Link },
-      { path: '/competitors', title: '竞品对标', icon: Compass },
     ],
   },
 ]
 
 const pageSubtitles: Record<string, string> = {
-  '/dashboard': '关键词、排名、社交与外链核心指标一览',
-  '/recommendations': '策略引擎生成的优化工单',
-  '/articles': 'AI 辅助写作与文章状态管理',
-  '/seo-checker': 'Title、Meta、结构与健康度评分',
-  '/social': 'PulseForge 账号连接与发帖调度',
+  '/dashboard': '关键词排名与社交分发核心指标一览',
+  '/social': 'Reddit 创作、审核与发布',
+  '/accounts': 'Zernio Key 与 Reddit 账号同步管理',
+  '/brands': '品牌与产品资料，供约 10% 产品向评论选用',
   '/serp': 'Google 排名趋势与抓取快照',
-  '/search-console': '客户网站在 Google 搜索中的真实表现数据',
-  '/backlinks': '外链新增、丢失与存活监控',
-  '/competitors': '竞品域名排名对比',
 }
 
-const activeMenu = computed(() => {
-  const path = route.path
-  if (path.startsWith('/articles')) return '/articles'
-  return path
-})
+const activeMenu = computed(() => route.path)
 
 const currentTitle = computed(() => (route.meta.title as string) || '')
 const currentSubtitle = computed(() => pageSubtitles[activeMenu.value] || '')

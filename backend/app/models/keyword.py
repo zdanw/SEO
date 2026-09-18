@@ -1,6 +1,6 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, DateTime, ForeignKey, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Integer, String, DateTime, ForeignKey
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
@@ -24,8 +24,6 @@ class Keyword(Base):
         default=datetime.utcnow,
         nullable=False,
     )
-
-    articles: Mapped[list["Article"]] = relationship(back_populates="keyword")
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Keyword #{self.id} {self.keyword!r}>"

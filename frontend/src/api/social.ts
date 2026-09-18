@@ -1,6 +1,5 @@
 import http from './http'
 
-// ============ Types ============
 export type Platform = 'pulseforge' | 'linkedin' | 'twitter' | 'facebook' | 'reddit'
 export type PostStatus = 'pending' | 'scheduled' | 'posting' | 'posted' | 'failed' | 'cancelled'
 
@@ -33,7 +32,6 @@ export interface SocialAccountUpdate {
 
 export interface SocialPost {
   id: number
-  article_id?: number | null
   account_id: number
   title?: string
   summary?: string
@@ -51,11 +49,9 @@ export interface SocialPost {
   updated_at: string
   platform?: string
   account_name?: string
-  article_title?: string
 }
 
 export interface SocialPostCreate {
-  article_id?: number
   account_id: number
   title?: string
   summary?: string
@@ -74,30 +70,6 @@ export interface SocialPostUpdate {
   scheduled_at?: string
 }
 
-export interface AutoDistributeRequest {
-  article_id: number
-  delay_minutes?: number
-}
-
-export interface AutoDistributeResponse {
-  article_id: number
-  created_posts: SocialPost[]
-  skipped_accounts: string[]
-}
-
-export interface CommunityCommentDraft {
-  platform: string
-  article_title: string
-  comment: string
-  tone: string
-}
-
-export interface CommunityCommentsResponse {
-  article_id: number
-  comments: CommunityCommentDraft[]
-}
-
-// ============ Accounts API ============
 export function listAccounts() {
   return http.get<any, SocialAccount[]>('/social/accounts')
 }
@@ -114,8 +86,7 @@ export function deleteAccount(id: number) {
   return http.delete(`/social/accounts/${id}`)
 }
 
-// ============ Posts API ============
-export function listPosts(params?: { status?: string; account_id?: number; article_id?: number }) {
+export function listPosts(params?: { status?: string; account_id?: number }) {
   return http.get<any, SocialPost[]>('/social/posts', { params })
 }
 
@@ -133,18 +104,4 @@ export function deletePost(id: number) {
 
 export function sendPostNow(id: number) {
   return http.post<any, SocialPost>(`/social/posts/${id}/send-now`, {})
-}
-
-// ============ Auto Distribute ============
-export function autoDistribute(payload: AutoDistributeRequest) {
-  return http.post<any, AutoDistributeResponse>('/social/auto-distribute', payload)
-}
-
-// ============ Community Comments ============
-export function generateCommentDrafts(article_id: number, platforms?: string[], count?: number) {
-  return http.post<any, CommunityCommentsResponse>('/community/comments-draft', {
-    article_id,
-    platforms: platforms || ['Reddit', 'PulseForge'],
-    count: count || 3,
-  })
 }

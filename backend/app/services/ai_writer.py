@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from app.core.config import settings
+from app.services.reddit_humanize import strip_em_dashes
 from app.services.seo_analyzer import (
     META_IDEAL_MAX,
     META_IDEAL_MIN,
@@ -56,6 +57,22 @@ SYSTEM_PROMPT = (
     "你是一位资深 SEO 专家和内容写手，精通 E-E-A-T 原则。"
     "你的输出必须是结构清晰、信息密度高、避免空话套话的长文，语言与关键词保持一致。"
     "禁止编造数据或引用不存在的来源。"
+)
+
+REDDIT_SYSTEM_PROMPT = (
+    "You are a real Reddit commenter texting from your phone, not an SEO writer or marketer. "
+    "Keep it short and messy like everyday chat: contractions, fragments, maybe one typo vibe. "
+    "Never use numbered lists, bullet lists, TL;DR, section headers, or 'As an AI'. "
+    "Never use em dashes or en dashes; use commas, periods, or plain hyphens instead. "
+    "Do not invent sources or statistics."
+)
+
+REDDIT_POST_SYSTEM_PROMPT = (
+    "You write Reddit posts like a regular person ranting or sharing in the moment, "
+    "not a brand account and not a polished guide. First-person, short paragraphs, "
+    "no bullet lists, no numbered steps, no TL;DR, no FAQ layout. "
+    "Never use em dashes or en dashes; use commas, periods, or plain hyphens instead. "
+    "Do not sound like an ad. Do not invent specs, prices, or sources."
 )
 
 ARTICLE_PROMPT_TEMPLATE = """请围绕核心关键词「{keyword}」撰写一篇 1500-2000 字的高质量 SEO 长文。
@@ -115,48 +132,76 @@ SOCIAL_PROMPT_TEMPLATE = """基于以下文章，为 {platform} 平台生成 1 �
 {{"title": "<文案标题>", "summary": "<文案正文>", "hashtags": ["#标签1", "#标签2"]}}
 """
 
-REDDIT_CONSULTATION_PROMPT = """Write a Reddit post for r/{subreddit} as a genuine user asking for advice.
+REDDIT_CONSULTATION_PROMPT = """Write a Reddit post for r/{subreddit} answering a common question like you're chatting with someone, not publishing a guide.
 
-Topic/keyword: {keyword}
+Question/keyword: {keyword}
+{site_line}
 
 Requirements:
-- English, first-person, authentic question tone
-- Title: engaging, under 300 characters, sounds like a real Reddit post
-- Body: 100-250 words, invite discussion
-- NO links, NO product promotion, NO marketing language
-- Match the subreddit culture
+- English, first-person, like a tired parent typing on their phone
+- Title: casual question or "what worked for us" vibe, under 300 characters (not "Here's what I learned" essay energy)
+- Body: 80-180 words, 1-3 short paragraphs only
+- Give 1-2 concrete tips woven into sentences. NO numbered lists, NO bullets, NO section headers, NO TL;DR
+- Never use em dashes or en dashes
+- NO links, NO hard product promotion; if a site URL is provided, one soft mention at most
+- Sound unfinished / conversational, not like a prepared answer
 
 Output JSON only:
 {{"title": "...", "body": "..."}}
 """
 
-REDDIT_EXPERIENCE_PROMPT = """Write a Reddit post for r/{subreddit} sharing personal experience.
+REDDIT_EXPERIENCE_PROMPT = """Write a Reddit post for r/{subreddit} sharing a personal experience like a quick vent or update.
 
 Topic/keyword: {keyword}
 {site_line}
 
 Requirements:
-- English, first-person storytelling
-- Title: under 300 characters
-- Body: 150-350 words, mention 1-2 specific products naturally from personal use
-- Avoid hard-sell; sound like a helpful community member
-- If site URL provided, mention it softly at the end as "full comparison/write-up"
+- English, first-person, messy and brief
+- Title: under 300 characters, casual
+- Body: 80-160 words, short paragraphs. No pros/cons sections, no bullets, no numbered steps
+- Never use em dashes or en dashes
+- Mention at most one product naturally if it fits; no hard-sell
+- If site URL provided, one soft mention max at the end
+- End with a simple question or shrug, not a call-to-action
 
 Output JSON only:
 {{"title": "...", "body": "..."}}
 """
 
-REDDIT_COMMENT_PROMPT = """You are a real Reddit user commenting on this post in r/{subreddit}:
+REDDIT_COMPARISON_PROMPT = """Write a Reddit post for r/{subreddit} casually comparing a few options, like telling a friend what you tried, not a buying guide.
+
+Topic/keyword: {keyword}
+{site_line}
+
+Requirements:
+- English, first-person, fair but informal
+- Title: under 300 characters, not "2026 guide / Compared vs vs"
+- Body: 100-200 words in flowing paragraphs only
+- Mention 2-3 options in prose ("we tried X then Y..."). NO bullet lists, NO scorecards, NO TL;DR, NO "How to choose" sections
+- Never use em dashes or en dashes
+- Do not invent fake specs or prices
+- NO links unless site URL provided; then one soft mention max
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_COMMENT_PROMPT = """You are a real Reddit user casually replying in r/{subreddit}:
 
 Title: {post_title}
-Post: {post_body}
+Post body:
+{post_body}
 
+{persona_line}
+{intent_line}
 {site_line}
 
-Write ONE comment in English, 50-120 words:
-- Sound human: specific details, personal experience, or a thoughtful follow-up question
-- Avoid hard-sell; do not sound like marketing
-- If site URL provided, mention only if genuinely relevant
+Write ONE short comment in English, 25-80 words:
+- Reply ONLY to this post. No unrelated product pitch.
+- Sound like everyday chat, maybe one concrete detail or a quick question
+- Contractions, fragments OK. Do not start with Yeah / Honestly / As someone
+- No lists, no "hope this helps", no essay structure, no marketing voice
+- Never use em dashes or en dashes
 
 Output the comment text only, no prefix or quotes.
 """
@@ -310,22 +355,38 @@ class DeepSeekClient:
         subreddit: str,
         keyword: str,
         site_url: str | None = None,
+        *,
+        persona_prompt: str = "",
+        product_brief: dict | None = None,
     ) -> dict[str, str]:
-        """Generate Reddit consultation or experience post (English)."""
+        """Generate Reddit post: consultation / experience / comparison (English)."""
         sr = subreddit.removeprefix("r/").strip()
+        extra = _reddit_post_extra_lines(persona_prompt, product_brief)
         if post_type == "consultation":
-            prompt = REDDIT_CONSULTATION_PROMPT.format(subreddit=sr, keyword=keyword)
+            site_line = (
+                f"You may softly reference this site as optional reading if relevant: {site_url}"
+                if site_url
+                else "Do not include any links."
+            )
+            prompt = REDDIT_CONSULTATION_PROMPT.format(subreddit=sr, keyword=keyword, site_line=site_line + extra)
+        elif post_type == "comparison":
+            site_line = (
+                f"You may mention this site once at the end as 'full data/write-up': {site_url}"
+                if site_url
+                else "Do not include any links."
+            )
+            prompt = REDDIT_COMPARISON_PROMPT.format(subreddit=sr, keyword=keyword, site_line=site_line + extra)
         else:
             site_line = f"Site URL to soft-mention if natural: {site_url}" if site_url else "Do not include any links."
             prompt = REDDIT_EXPERIENCE_PROMPT.format(
-                subreddit=sr, keyword=keyword, site_line=site_line
+                subreddit=sr, keyword=keyword, site_line=site_line + extra
             )
-        raw = self.chat(prompt, temperature=0.85, max_tokens=800)
+        raw = self.chat(prompt, system_prompt=REDDIT_POST_SYSTEM_PROMPT, temperature=0.9, max_tokens=700)
         try:
             obj = json.loads(_extract_json(raw))
             return {
-                "title": str(obj.get("title", keyword))[:300],
-                "body": str(obj.get("body", "")),
+                "title": strip_em_dashes(str(obj.get("title", keyword)))[:300],
+                "body": strip_em_dashes(str(obj.get("body", ""))),
             }
         except (json.JSONDecodeError, ValueError) as e:
             raise DeepSeekError(f"Reddit post JSON parse failed: {e}; raw={raw[:300]}") from e
@@ -336,24 +397,84 @@ class DeepSeekClient:
         post_body: str,
         subreddit: str,
         site_url: str | None = None,
+        *,
+        intent: str = "casual",
+        persona_prompt: str = "",
+        product_brief: dict | None = None,
     ) -> str:
         """Generate a contextual Reddit comment (English)."""
         sr = subreddit.removeprefix("r/").strip()
-        site_line = (
-            f"You may softly reference this site if relevant: {site_url}"
-            if site_url
-            else "Do not include links."
-        )
+        persona_line = f"Persona: {persona_prompt}" if persona_prompt else ""
+        if intent == "promo" and product_brief:
+            brand = str(product_brief.get("brand") or "").strip()
+            product = str(product_brief.get("product") or "").strip()
+            points = product_brief.get("talking_points") or []
+            never = str(product_brief.get("never_claim") or "").strip()
+            intent_line = (
+                "Intent: lightly helpful product mention ONLY if the post is already about this category. "
+                f"Brand you may mention once if natural: {brand or '(none)'}. "
+                f"Product to lean toward: {product or '(none)'}. "
+                f"Talking points: {', '.join(str(p) for p in points[:3]) or '(none)'}. "
+                f"Never claim: {never or '(none)'}. No hard sell, no links unless a site URL is provided."
+            )
+            site_line = (
+                f"You may softly reference this site if relevant: {site_url}"
+                if site_url
+                else "Do not include links."
+            )
+        else:
+            intent_line = (
+                "Intent: casual community reply. Do not mention any brand, product, company, "
+                "or website. Must not mention marketing talking points."
+            )
+            site_line = "Do not include links."
         prompt = REDDIT_COMMENT_PROMPT.format(
             subreddit=sr,
-            post_title=post_title[:500],
-            post_body=(post_body or "")[:1500],
+            post_title=post_title[:500] or "(untitled)",
+            post_body=(post_body or "").strip()[:1500] or "(no body; link/image post; reply based on the title only)",
+            persona_line=persona_line,
+            intent_line=intent_line,
             site_line=site_line,
         )
-        return self.chat(prompt, temperature=0.85, max_tokens=250).strip()
+        return strip_em_dashes(
+            self.chat(
+                prompt,
+                system_prompt=REDDIT_SYSTEM_PROMPT,
+                temperature=0.95,
+                max_tokens=180,
+            )
+        ).strip()
 
 
 # ============ 工具函数 ============
+def _reddit_post_extra_lines(persona_prompt: str, product_brief: dict | None) -> str:
+    chunks: list[str] = []
+    if persona_prompt:
+        chunks.append(f"Author persona: {persona_prompt}")
+    if product_brief:
+        brand = str(product_brief.get("brand") or "").strip()
+        category = str(product_brief.get("category") or "").strip()
+        points = product_brief.get("talking_points") or []
+        comps = product_brief.get("competitors") or []
+        never = str(product_brief.get("never_claim") or "").strip()
+        if brand:
+            chunks.append(f"Our product brand (mention naturally at most once if relevant): {brand}")
+        product = str(product_brief.get("product") or "").strip()
+        if product:
+            chunks.append(f"Focus this reply around the product: {product}")
+        if category:
+            chunks.append(f"Category: {category}")
+        if points:
+            chunks.append("Allowed talking points: " + "; ".join(str(p) for p in points[:3]))
+        if comps:
+            chunks.append("Other options you may compare fairly: " + ", ".join(str(c) for c in comps[:5]))
+        if never:
+            chunks.append(f"Never claim: {never}")
+    if not chunks:
+        return ""
+    return "\n" + "\n".join(chunks)
+
+
 def _parse_article_draft(
     raw_text: str, keyword: str
 ) -> tuple[str, str, str, list[str]]:
@@ -599,16 +720,24 @@ def _extract_json(text: str) -> str:
 _client_cache: dict[str, DeepSeekClient] = {}
 
 
-def get_ai_client(provider: str = "deepseek") -> DeepSeekClient:
-    """获取 AI 客户端实例，支持 deepseek / agnes 两个提供商。
+def preferred_ai_provider() -> str:
+    """有 Agnes Key 时优先 Agnes，否则 DeepSeek。"""
+    if settings.AGNES_API_KEY:
+        return "agnes"
+    return "deepseek"
 
-    provider="deepseek" → 使用 DEEPSEEK_* 配置
-    provider="agnes"    → 使用 AGNES_* 配置（需在 .env 中设置 AGNES_API_KEY）
+
+def get_ai_client(provider: str | None = None) -> DeepSeekClient:
+    """获取 AI 客户端实例，支持 deepseek / agnes。
+
+    provider 为 None 时：优先 Agnes（已配 AGNES_API_KEY），否则 DeepSeek。
+    provider="deepseek" / "agnes" 时强制使用对应配置。
     """
-    if provider in _client_cache:
-        return _client_cache[provider]
+    resolved = provider or preferred_ai_provider()
+    if resolved in _client_cache:
+        return _client_cache[resolved]
 
-    prefix = provider.upper()
+    prefix = resolved.upper()
     key_env = f"{prefix}_API_KEY"
     url_env = f"{prefix}_BASE_URL"
     model_env = f"{prefix}_MODEL"
@@ -621,9 +750,9 @@ def get_ai_client(provider: str = "deepseek") -> DeepSeekClient:
 
     if not api_key:
         raise DeepSeekError(
-            f"{provider.upper()} API Key 未配置，请在 backend/.env 中设置 {key_env} 后重启服务。"
+            f"{resolved.upper()} API Key 未配置，请在 backend/.env 中设置 {key_env} 后重启服务。"
         )
 
     client = DeepSeekClient(api_key=api_key, base_url=base_url, model=model, timeout=timeout)
-    _client_cache[provider] = client
+    _client_cache[resolved] = client
     return client

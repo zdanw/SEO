@@ -38,10 +38,18 @@ http.interceptors.response.use(
     } else if (status === 403) {
       ElMessage.error('没有权限访问该资源')
     } else if (typeof status === 'number' && status >= 500) {
-      ElMessage.error('服务器错误，请稍后重试')
+      const detail = error?.response?.data?.detail
+      ElMessage.error(typeof detail === 'string' && detail ? detail : '服务器错误，请稍后重试')
     } else {
       const detail = error?.response?.data?.detail
-      const msg = detail ?? error?.message ?? '请求失败'
+      let msg: string
+      if (detail && typeof detail === 'object' && 'errors' in (detail as Record<string, unknown>)) {
+        const d = detail as { message?: string; errors?: string[]; warnings?: string[] }
+        const lines = [...(d.errors || []), ...(d.warnings || []).map((w) => `提示：${w}`)]
+        msg = lines.length ? `${d.message || '操作被拦截'}：${lines.join('；')}` : JSON.stringify(detail)
+      } else {
+        msg = (detail as string) ?? error?.message ?? '请求失败'
+      }
       ElMessage.error(typeof msg === 'string' ? msg : JSON.stringify(msg))
     }
     return Promise.reject(error)

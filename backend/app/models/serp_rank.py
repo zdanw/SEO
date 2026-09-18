@@ -27,21 +27,3 @@ class SerpRankSnapshot(Base):
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<SerpRankSnapshot kw={self.keyword_id} rank={self.rank} at={self.time}>"
-
-
-class CompetitorRankSnapshot(Base):
-    """竞品排名快照 - TimescaleDB hypertable。
-
-    复合主键 (time, competitor_id, keyword_id)。
-    """
-    __tablename__ = "competitor_rank_snapshots"
-
-    time: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, nullable=False)
-    competitor_id: Mapped[int] = mapped_column(Integer, ForeignKey("competitors.id"), primary_key=True, nullable=False)
-    keyword_id: Mapped[int] = mapped_column(Integer, ForeignKey("keywords.id"), primary_key=True, nullable=False)
-    domain: Mapped[str] = mapped_column(String(200), nullable=False)
-    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    target_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
-
-    def __repr__(self) -> str:  # pragma: no cover
-        return f"<CompetitorRankSnapshot comp={self.competitor_id} kw={self.keyword_id} rank={self.rank}>"

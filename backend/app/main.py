@@ -15,7 +15,7 @@ def create_application() -> FastAPI:
         title=settings.APP_NAME,
         version="0.1.0",
         debug=settings.APP_DEBUG,
-        description="SEO 闭环系统 - 内容创作 / 站内优化 / 社交分发 / 排名监控",
+        description="SEO 平台 - 综合大屏 / Reddit 社交分发 / 排名监控",
     )
 
     app.add_middleware(
