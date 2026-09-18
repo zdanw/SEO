@@ -11,19 +11,6 @@ from app.schemas.keyword import (
     KeywordCreate,
     KeywordOut,
 )
-from app.schemas.social import (
-    SocialAccountBase,
-    SocialAccountCreate,
-    SocialAccountUpdate,
-    SocialAccountOut,
-    SocialPostBase,
-    SocialPostCreate,
-    SocialPostUpdate,
-    SocialPostOut,
-    SocialPostSendNow,
-    Platform,
-    PostStatus,
-)
 
 __all__ = [
     "Token",
@@ -35,15 +22,4 @@ __all__ = [
     "KeywordBase",
     "KeywordCreate",
     "KeywordOut",
-    "SocialAccountBase",
-    "SocialAccountCreate",
-    "SocialAccountUpdate",
-    "SocialAccountOut",
-    "SocialPostBase",
-    "SocialPostCreate",
-    "SocialPostUpdate",
-    "SocialPostOut",
-    "SocialPostSendNow",
-    "Platform",
-    "PostStatus",
 ]

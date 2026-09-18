@@ -9,7 +9,6 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
     include=[
         "app.tasks.serp_tasks",
-        "app.tasks.social_tasks",
         "app.tasks.alert_tasks",
         "app.tasks.reddit_tasks",
     ],
@@ -28,7 +27,6 @@ celery_app.conf.update(
     task_default_queue="default",
     task_routes={
         "app.tasks.serp_*": {"queue": "serp"},
-        "app.tasks.social_*": {"queue": "social"},
         "app.tasks.reddit_*": {"queue": "social"},
     },
     beat_schedule={

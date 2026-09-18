@@ -101,15 +101,7 @@ def analyze(
     report.ai_detected_score = ai_result.score
     report.ai_detail = ai_result.to_dict()
 
-    # SERP 内容优化评分（有关键词时）
-    if keyword and keyword.strip():
-        from app.services.content_optimizer import score_content_for_serp
-
-        try:
-            serp = score_content_for_serp(content or "", keyword.strip())
-            report.serp_detail = serp.to_dict()
-        except Exception:
-            report.serp_detail = {}
+    report.serp_detail = {}
 
     # CWV 预估
     report.cwv_estimate = _estimate_cwv(content or "", cover_image_url)

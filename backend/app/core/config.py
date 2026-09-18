@@ -54,22 +54,10 @@ class Settings(BaseSettings):
     AI_DETECTOR_LMSCAN_WEIGHT: float = 0.6
     AI_DETECTOR_SIGNS_WEIGHT: float = 0.4
 
-    # seoscan（Node.js CLI）URL 技术审计
-    SEOSCAN_TIMEOUT: int = 120
-
-    # PulseForge
-    PULSEFORGE_API_BASE: Optional[str] = None
-    PULSEFORGE_API_KEY: Optional[str] = None
-    PULSEFORGE_TIMEOUT: int = 30
-
     # SERP 抓取：ScrapingBee Google Search API（优先于代理池）
     SCRAPINGBEE_API_KEY: Optional[str] = None
     SCRAPINGBEE_TIMEOUT: int = 60
     SCRAPINGBEE_PAGES: int = 3  # 单次请求聚合的 Google 结果页数（建议 ≤3）
-
-    # SERP 内容优化：竞品页面分析数量与地区
-    SERP_BENCHMARK_TOP_N: int = 5
-    SERP_BENCHMARK_REGION: str = "us"
 
     # 代理（ScrapingBee 未配置时使用）
     PROXY_PROVIDER: Optional[str] = None
@@ -86,16 +74,7 @@ class Settings(BaseSettings):
     SMTP_FROM: str = "seo-platform@example.com"
     ALERT_EMAIL_TO: Optional[str] = None
 
-    # Google Search Console OAuth
-    GOOGLE_CLIENT_ID: Optional[str] = None
-    GOOGLE_CLIENT_SECRET: Optional[str] = None
-    GOOGLE_REDIRECT_URI: str = "http://127.0.0.1:8000/api/v1/gsc/oauth/callback"
     FRONTEND_URL: str = "http://127.0.0.1:5173"
-
-    # PageSpeed Insights API（Core Web Vitals 真实测量）
-    PAGESPEED_API_KEY: Optional[str] = None
-    PAGESPEED_TIMEOUT: int = 90
-    PAGESPEED_STRATEGY: str = "mobile"  # mobile | desktop
 
     # Zernio API 端点（凭证仅在前端「社交账号」写入 zernio_api_keys，不走环境变量）
     ZERNIO_API_BASE: str = "https://zernio.com/api/v1"

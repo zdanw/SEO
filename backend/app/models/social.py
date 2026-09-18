@@ -14,7 +14,7 @@ class SocialAccount(Base):
     site_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("client_sites.id"), nullable=True, index=True
     )
-    platform: Mapped[str] = mapped_column(String(50), nullable=False)  # pulseforge / linkedin / twitter / facebook
+    platform: Mapped[str] = mapped_column(String(50), nullable=False)  # reddit / linkedin / twitter / facebook
     account_name: Mapped[str] = mapped_column(String(100), nullable=False)
     access_token: Mapped[str | None] = mapped_column(Text, nullable=True)
     refresh_token: Mapped[str | None] = mapped_column(Text, nullable=True)

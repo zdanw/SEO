@@ -50,10 +50,7 @@ class TokenBucketConfig:
 
 # 各平台默认限流配置
 PLATFORM_LIMITS: dict[str, TokenBucketConfig] = {
-    "pulseforge": TokenBucketConfig(capacity=3, refill_rate=0.5),   # 2 秒 1 次
-    "linkedin": TokenBucketConfig(capacity=2, refill_rate=1/60),    # 1 分钟 1 次
-    "twitter": TokenBucketConfig(capacity=5, refill_rate=1/3),      # 3 秒 1 次
-    "facebook": TokenBucketConfig(capacity=2, refill_rate=1/30),    # 30 秒 1 次
+    "serp": TokenBucketConfig(capacity=5, refill_rate=1.0),
     "reddit": TokenBucketConfig(capacity=3, refill_rate=1/10),      # 10 秒 1 次
     "default": TokenBucketConfig(capacity=5, refill_rate=1.0),
 }
@@ -123,8 +120,8 @@ class BreakerConfig:
 
 
 BREAKER_CONFIGS: dict[str, BreakerConfig] = {
-    "pulseforge": BreakerConfig(failure_threshold=5, failure_rate_threshold=0.5, open_duration=3600),
-    "linkedin": BreakerConfig(failure_threshold=3, failure_rate_threshold=0.5, open_duration=1800),
+    "serp": BreakerConfig(),
+    "reddit": BreakerConfig(failure_threshold=5, failure_rate_threshold=0.5, open_duration=3600),
     "default": BreakerConfig(),
 }
 
