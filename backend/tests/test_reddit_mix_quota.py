@@ -1,5 +1,11 @@
 """90/10 产品内容配额：近窗口内已发布 promo 不得超过 10%。"""
-from app.services.reddit_mix import MixQuotaExceeded, _COUNTED_STATUSES, can_enqueue_promo, enforce_promo_quota
+from app.services.reddit_mix import (
+    MixQuotaExceeded,
+    _COUNTED_STATUSES,
+    can_enqueue_promo,
+    enforce_promo_quota,
+    resolve_post_intent,
+)
 
 
 def test_third_promo_among_twenty_is_rejected():
@@ -33,3 +39,14 @@ def test_quota_counts_posted_only():
     assert "posted" in _COUNTED_STATUSES
     assert "pending_review" not in _COUNTED_STATUSES
     assert "approved" not in _COUNTED_STATUSES
+
+
+def test_resolve_post_intent_vent_and_help_always_casual():
+    assert resolve_post_intent(post_type="vent", community_purpose="promo", include_site_url=True) == "casual"
+    assert resolve_post_intent(post_type="help_seek", community_purpose="promo") == "casual"
+
+
+def test_resolve_post_intent_follows_community_for_other_types():
+    assert resolve_post_intent(post_type="pitfall", community_purpose="persona") == "casual"
+    assert resolve_post_intent(post_type="guide", community_purpose="promo") == "promo"
+    assert resolve_post_intent(post_type="unpopular", community_purpose=None, include_site_url=True) == "promo"

@@ -119,6 +119,18 @@ class RedditApiClient:
         sr = normalize_subreddit(subreddit)
         return self._call(self._zernio.list_feed, self._require_zernio_id(), sr, limit)
 
+    def vote(self, thing_id: str, direction: int = 1) -> dict[str, Any]:
+        return self._call(self._zernio.vote_reddit_thing, self._require_zernio_id(), thing_id, direction)
+
+    def list_post_comments(self, thing_id: str, subreddit: str = "", limit: int = 8) -> list[dict[str, Any]]:
+        return self._call(
+            self._zernio.list_post_comments,
+            self._require_zernio_id(),
+            thing_id,
+            normalize_subreddit(subreddit) if subreddit else "",
+            limit,
+        )
+
 
 def resolve_zernio_api_credentials(
     config: dict | None,

@@ -1,9 +1,28 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Float, Integer, String, Text, JSON, Boolean
+from sqlalchemy import (
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    String,
+    Table,
+    Text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+
+reddit_product_communities = Table(
+    "reddit_product_communities",
+    Base.metadata,
+    Column("product_id", Integer, ForeignKey("reddit_products.id", ondelete="CASCADE"), primary_key=True),
+    Column("community_id", Integer, ForeignKey("reddit_communities.id", ondelete="CASCADE"), primary_key=True),
+)
 
 
 class RedditPost(Base):
@@ -18,7 +37,7 @@ class RedditPost(Base):
     account_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("social_accounts.id"), nullable=False, index=True
     )
-    post_type: Mapped[str] = mapped_column(String(20), nullable=False)  # consultation / experience / comparison
+    post_type: Mapped[str] = mapped_column(String(20), nullable=False)  # pitfall/vent/unpopular/guide/help_seek
     subreddit: Mapped[str] = mapped_column(String(100), nullable=False)
     keyword: Mapped[str] = mapped_column(String(200), nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -158,11 +177,24 @@ class RedditCommunity(Base):
     best_hour_utc: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 海外活跃时段（UTC）
     priority: Mapped[int] = mapped_column(Integer, default=3, nullable=False)  # 1 最高
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exists: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    subscribers: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    accounts_active: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    posts_7d: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    activity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    verify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    products: Mapped[list["RedditProduct"]] = relationship(
+        "RedditProduct",
+        secondary=reddit_product_communities,
+        back_populates="communities",
     )
 
 
@@ -210,6 +242,11 @@ class RedditProduct(Base):
     )
 
     brand: Mapped["RedditBrand"] = relationship("RedditBrand", back_populates="products")
+    communities: Mapped[list["RedditCommunity"]] = relationship(
+        "RedditCommunity",
+        secondary=reddit_product_communities,
+        back_populates="products",
+    )
 
 
 class RedditKeyword(Base):

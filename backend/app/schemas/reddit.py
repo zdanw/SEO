@@ -3,7 +3,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ConfigDict
 
-PostType = Literal["consultation", "experience", "comparison"]
+PostType = Literal["pitfall", "vent", "unpopular", "guide", "help_seek"]
+POST_TYPES: tuple[str, ...] = ("pitfall", "vent", "unpopular", "guide", "help_seek")
 ReviewStatus = Literal[
     "draft", "pending_review", "approved", "rejected", "posting", "posted", "failed"
 ]
@@ -98,6 +99,13 @@ class RedditCommunityUpdate(BaseModel):
 class RedditCommunityOut(RedditCommunityBase):
     id: int
     account_id: Optional[int] = None
+    verified_at: Optional[datetime] = None
+    exists: Optional[bool] = None
+    subscribers: Optional[int] = None
+    accounts_active: Optional[int] = None
+    posts_7d: Optional[int] = None
+    activity_score: Optional[float] = None
+    verify_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -127,11 +135,6 @@ class RedditKeywordOut(RedditKeywordBase):
     last_used_at: Optional[datetime] = None
     created_at: datetime
     model_config = ConfigDict(from_attributes=True)
-
-
-class RedditSeedOut(BaseModel):
-    communities_added: int = 0
-    keywords_added: int = 0
 
 
 class ZernioKeyOut(BaseModel):
@@ -164,7 +167,7 @@ class RedditPostGenerateIn(BaseModel):
     account_id: int
     post_type: PostType
     subreddit: str = Field(min_length=1, max_length=100)
-    keyword: str = Field(min_length=1, max_length=200)
+    keyword: str = Field(default="", max_length=200)
     include_site_url: bool = False
 
 
@@ -272,6 +275,35 @@ class RedditDiscoverItem(BaseModel):
     body: str = ""
 
 
+class RedditEngageCommentOut(BaseModel):
+    thing_id: str
+    body: str = ""
+    author: str = ""
+    score: int = 0
+    created_utc: int = 0
+    url: str = ""
+
+
+class RedditEngageCommentsOut(BaseModel):
+    items: list[RedditEngageCommentOut]
+
+
+class RedditEngageFeedOut(BaseModel):
+    items: list[RedditDiscoverItem]
+
+
+class RedditVoteIn(BaseModel):
+    account_id: int
+    thing_id: str = Field(min_length=3, max_length=64)
+    direction: int = Field(default=1, ge=-1, le=1)
+
+
+class RedditVoteOut(BaseModel):
+    ok: bool = True
+    thing_id: str
+    direction: int
+
+
 class RedditDiscoverMeta(BaseModel):
     auto_mode: bool = False
     queued_count: int = 0
@@ -301,6 +333,7 @@ class RedditProductIn(BaseModel):
     category: str = Field(default="", max_length=120)
     talking_points: list[str] = Field(default_factory=list, max_length=8)
     is_active: bool = True
+    community_ids: list[int] = Field(default_factory=list)
 
 
 class RedditProductUpdate(BaseModel):
@@ -308,6 +341,7 @@ class RedditProductUpdate(BaseModel):
     category: Optional[str] = Field(default=None, max_length=120)
     talking_points: Optional[list[str]] = Field(default=None, max_length=8)
     is_active: Optional[bool] = None
+    community_ids: Optional[list[int]] = None
 
 
 class RedditProductOut(BaseModel):
@@ -317,6 +351,8 @@ class RedditProductOut(BaseModel):
     category: str = ""
     talking_points: list[str] = Field(default_factory=list)
     is_active: bool = True
+    community_ids: list[int] = Field(default_factory=list)
+    community_names: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)

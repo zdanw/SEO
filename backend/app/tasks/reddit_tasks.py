@@ -245,11 +245,14 @@ def discover_reddit_discussions() -> dict:
             )
             product = None
             if brand:
-                product = (
+                candidates = (
                     db.query(RedditProduct)
                     .filter(RedditProduct.brand_id == brand.id, RedditProduct.is_active.is_(True))
                     .order_by(RedditProduct.id.asc())
-                    .first()
+                    .all()
+                )
+                product = next((p for p in candidates if p.communities), None) or (
+                    candidates[0] if candidates else None
                 )
             brand_id = brand.id if brand else None
             product_id = product.id if product else None
@@ -284,6 +287,7 @@ def discover_reddit_discussions() -> dict:
                 search_posts=_search,
                 remaining_slots=remaining,
                 seed=account.id,
+                product_id=product_id,
             )
             queued_total += int(result.get("queued") or 0)
         logger.info("Reddit smart discover queued %s comments", queued_total)

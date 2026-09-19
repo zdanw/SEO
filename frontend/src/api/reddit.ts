@@ -1,6 +1,6 @@
 import http from './http'
 
-export type PostType = 'consultation' | 'experience' | 'comparison'
+export type PostType = 'pitfall' | 'vent' | 'unpopular' | 'guide' | 'help_seek'
 export type ReviewStatus =
   | 'draft' | 'pending_review' | 'approved' | 'rejected' | 'posting' | 'posted' | 'failed'
 export type AccountRole = 'warmup' | 'seeding' | 'expert'
@@ -177,6 +177,8 @@ export interface RedditBrandProduct {
   category: string
   talking_points: string[]
   is_active: boolean
+  community_ids?: number[]
+  community_names?: string[]
   created_at: string
   updated_at: string
 }
@@ -189,11 +191,6 @@ export interface RedditBrand {
   products: RedditBrandProduct[]
   created_at: string
   updated_at: string
-}
-
-export interface RedditSeedResult {
-  communities_added: number
-  keywords_added: number
 }
 
 // ============ 状态 / 账号 ============
@@ -229,12 +226,6 @@ export function updateAccountProfile(
 // ============ 社区库 ============
 export function listCommunities(accountId?: number) {
   return http.get<any, RedditCommunity[]>('/reddit/communities', {
-    params: accountId ? { account_id: accountId } : undefined,
-  })
-}
-
-export function seedRedditDefaults(accountId?: number) {
-  return http.post<any, RedditSeedResult>('/reddit/communities/seed', {}, {
     params: accountId ? { account_id: accountId } : undefined,
   })
 }
@@ -315,6 +306,7 @@ export function createBrandProduct(brandId: number, payload: {
   category?: string
   talking_points?: string[]
   is_active?: boolean
+  community_ids?: number[]
 }) {
   return http.post<any, RedditBrandProduct>(`/reddit/brands/${brandId}/products`, payload)
 }
@@ -324,6 +316,7 @@ export function updateBrandProduct(productId: number, payload: {
   category?: string
   talking_points?: string[]
   is_active?: boolean
+  community_ids?: number[]
 }) {
   return http.patch<any, RedditBrandProduct>(`/reddit/products/${productId}`, payload)
 }
@@ -350,7 +343,7 @@ export function generateRedditPost(payload: {
   account_id: number
   post_type: PostType
   subreddit: string
-  keyword: string
+  keyword?: string
   include_site_url?: boolean
 }) {
   return http.post<any, RedditPost>('/reddit/posts/generate', payload)
@@ -469,4 +462,42 @@ export function searchRedditPosts(params: {
 // ============ 运营概览 ============
 export function getRedditOverview() {
   return http.get<any, RedditOverview>('/reddit/overview')
+}
+
+// ============ 养号互动 ============
+export interface RedditEngageComment {
+  thing_id: string
+  body: string
+  author: string
+  score: number
+  created_utc: number
+  url: string
+}
+
+export function fetchEngageFeed(params: {
+  account_id: number
+  subreddit: string
+  limit?: number
+}) {
+  return http.get<any, { items: RedditDiscoverItem[] }>('/reddit/engage/feed', { params })
+}
+
+export function fetchEngageComments(params: {
+  account_id: number
+  thing_id: string
+  subreddit?: string
+  limit?: number
+}) {
+  return http.get<any, { items: RedditEngageComment[] }>('/reddit/engage/comments', { params })
+}
+
+export function upvoteRedditThing(payload: {
+  account_id: number
+  thing_id: string
+  direction?: number
+}) {
+  return http.post<any, { ok: boolean; thing_id: string; direction: number }>(
+    '/reddit/engage/vote',
+    { direction: 1, ...payload },
+  )
 }

@@ -5,7 +5,7 @@
         <div class="card-title-row">
           <div>
             <span class="card-title">品牌 / 产品库</span>
-            <p class="muted" style="margin: 4px 0 0">用于约 10% 产品向 Reddit 评论；在「社交分发」生成时选择品牌与产品。</p>
+            <p class="muted" style="margin: 4px 0 0">用于约 10% 产品向 Reddit 评论；每个产品可绑定多个产品社区（多对多），智能发现只进入已绑定社区。</p>
           </div>
           <el-button type="primary" @click="openBrandEdit()">新增品牌</el-button>
         </div>
@@ -23,7 +23,7 @@
               closable
               @close="removeProduct(p)"
               @click="openProductEdit(row, p)"
-            >{{ p.name }}{{ p.category ? ` · ${p.category}` : '' }}</el-tag>
+            >{{ p.name }}{{ p.category ? ` · ${p.category}` : '' }}{{ (p.community_names || []).length ? ` · ${p.community_names.length}社区` : '' }}</el-tag>
             <el-button size="small" link type="primary" @click="openProductEdit(row)">+ 产品</el-button>
           </template>
         </el-table-column>
@@ -56,7 +56,7 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="productDialog" :title="productForm.id ? '编辑产品' : '新增产品'" width="520px">
+    <el-dialog v-model="productDialog" :title="productForm.id ? '编辑产品' : '新增产品'" width="560px">
       <el-form label-position="top">
         <el-form-item label="产品名">
           <el-input v-model="productForm.name" placeholder="baby monitor" />
@@ -66,6 +66,24 @@
         </el-form-item>
         <el-form-item label="可说卖点（逗号分隔）">
           <el-input v-model="productTalkingText" placeholder="no wifi, analog, low EMF" />
+        </el-form-item>
+        <el-form-item label="绑定产品社区（可多选；同一社区可绑多个产品）">
+          <el-select
+            v-model="productForm.community_ids"
+            multiple
+            filterable
+            clearable
+            placeholder="选择产品社区"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="c in promoCommunities"
+              :key="c.id"
+              :label="`r/${c.name}`"
+              :value="c.id"
+            />
+          </el-select>
+          <p class="muted" style="margin: 6px 0 0">仅列出社区库中 purpose=产品 的社区。未绑定则智能发现不会抽产品槽。</p>
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="productForm.is_active" />
@@ -85,10 +103,12 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   listBrands, createBrand, updateBrand, deleteBrand,
   createBrandProduct, updateBrandProduct, deleteBrandProduct,
-  type RedditBrand, type RedditBrandProduct,
+  listCommunities,
+  type RedditBrand, type RedditBrandProduct, type RedditCommunity,
 } from '@/api/reddit'
 
 const brands = ref<RedditBrand[]>([])
+const promoCommunities = ref<RedditCommunity[]>([])
 const loading = ref(false)
 const brandDialog = ref(false)
 const brandSaving = ref(false)
@@ -97,7 +117,7 @@ const productDialog = ref(false)
 const productSaving = ref(false)
 const productTalkingText = ref('')
 const productForm = reactive({
-  id: 0, brand_id: 0, name: '', category: '', is_active: true,
+  id: 0, brand_id: 0, name: '', category: '', is_active: true, community_ids: [] as number[],
 })
 
 function splitComma(text: string) {
@@ -111,6 +131,11 @@ async function loadBrands() {
   } finally {
     loading.value = false
   }
+}
+
+async function loadPromoCommunities() {
+  const rows = await listCommunities()
+  promoCommunities.value = (rows || []).filter((c) => c.purpose === 'promo' && c.is_active)
 }
 
 function openBrandEdit(row?: RedditBrand) {
@@ -171,12 +196,14 @@ function openProductEdit(brand: RedditBrand, row?: RedditBrandProduct) {
     productForm.name = row.name
     productForm.category = row.category || ''
     productForm.is_active = row.is_active
+    productForm.community_ids = [...(row.community_ids || [])]
     productTalkingText.value = (row.talking_points || []).join(', ')
   } else {
     productForm.id = 0
     productForm.name = ''
     productForm.category = ''
     productForm.is_active = true
+    productForm.community_ids = []
     productTalkingText.value = ''
   }
   productDialog.value = true
@@ -194,6 +221,7 @@ async function saveProduct() {
       category: productForm.category.trim(),
       talking_points: splitComma(productTalkingText.value),
       is_active: productForm.is_active,
+      community_ids: productForm.community_ids,
     }
     if (productForm.id) {
       await updateBrandProduct(productForm.id, payload)
@@ -221,7 +249,9 @@ async function removeProduct(row: RedditBrandProduct) {
   await loadBrands()
 }
 
-onMounted(loadBrands)
+onMounted(async () => {
+  await Promise.all([loadBrands(), loadPromoCommunities()])
+})
 </script>
 
 <style lang="scss" scoped>

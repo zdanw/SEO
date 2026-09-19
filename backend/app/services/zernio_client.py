@@ -324,6 +324,108 @@ class ZernioClient:
         )
         return self._map_search_items(data.get("items") or [], subreddit)
 
+    def vote_reddit_thing(
+        self,
+        zernio_account_id: str,
+        thing_id: str,
+        direction: int = 1,
+    ) -> dict[str, Any]:
+        """Upvote/downvote/clear via POST /accounts/{id}/reddit-vote."""
+        tid = (thing_id or "").strip()
+        if not tid:
+            raise ZernioError("thingId 不能为空", status_code=400)
+        if direction not in (1, 0, -1):
+            raise ZernioError("direction 必须是 1 / 0 / -1", status_code=400)
+        if self._mock_mode:
+            return {"ok": True, "thingId": tid, "direction": direction, "mock": True}
+        data = self._request(
+            "POST",
+            f"/accounts/{zernio_account_id}/reddit-vote",
+            json_body={"thingId": tid, "direction": direction},
+        )
+        return data if isinstance(data, dict) else {"ok": True, "thingId": tid, "direction": direction}
+
+    def list_post_comments(
+        self,
+        zernio_account_id: str,
+        thing_id: str,
+        subreddit: str,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """List comments on a Reddit post via GET /inbox/comments/{postId}."""
+        limit = min(max(limit, 1), 15)
+        post_id = (thing_id or "").strip().removeprefix("t3_")
+        if not post_id:
+            raise ZernioError("帖子 ID 不能为空", status_code=400)
+        if self._mock_mode:
+            return [
+                {
+                    "thing_id": f"t1_mock_{i}",
+                    "body": f"Mock comment {i} about the post",
+                    "author": f"user{i}",
+                    "score": 3 - i,
+                    "created_utc": int(time.time()) - i * 600,
+                    "url": "",
+                }
+                for i in range(1, min(limit, 4) + 1)
+            ]
+        sr = (subreddit or "").strip().removeprefix("r/").removeprefix("/")
+        params: dict[str, Any] = {"accountId": zernio_account_id, "limit": limit}
+        if sr:
+            params["subreddit"] = sr
+        data = self._request(
+            "GET",
+            f"/inbox/comments/{post_id}",
+            params=params,
+        )
+        raw = data.get("comments") if isinstance(data, dict) else None
+        if not isinstance(raw, list):
+            raw = data.get("items") if isinstance(data, dict) else []
+        return self._map_comment_items(raw or [])[:limit]
+
+    @staticmethod
+    def _map_comment_items(raw_items: list) -> list[dict[str, Any]]:
+        mapped: list[dict[str, Any]] = []
+
+        def _one(c: dict[str, Any]) -> dict[str, Any] | None:
+            cid = str(c.get("id") or c.get("cid") or c.get("name") or "").strip()
+            if not cid:
+                return None
+            if cid.startswith("t1_") or cid.startswith("t3_"):
+                thing_id = cid
+            else:
+                thing_id = f"t1_{cid}"
+            body = str(c.get("message") or c.get("body") or c.get("text") or "")
+            author = ""
+            frm = c.get("from")
+            if isinstance(frm, dict):
+                author = str(frm.get("username") or frm.get("name") or "")
+            else:
+                author = str(c.get("author") or "")
+            return {
+                "thing_id": thing_id,
+                "body": body,
+                "author": author,
+                "score": _as_int(c.get("likeCount") if c.get("likeCount") is not None else c.get("score")),
+                "created_utc": _as_int(c.get("createdUtc") if c.get("createdUtc") is not None else c.get("created_utc")),
+                "url": str(c.get("url") or ""),
+            }
+
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            top = _one(item)
+            if top:
+                mapped.append(top)
+            replies = item.get("replies")
+            if isinstance(replies, list):
+                for reply in replies:
+                    if isinstance(reply, dict):
+                        nested = _one(reply)
+                        if nested:
+                            mapped.append(nested)
+        return mapped
+
     def search_posts(
         self,
         zernio_account_id: str,

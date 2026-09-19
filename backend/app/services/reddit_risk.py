@@ -19,7 +19,6 @@ from app.models.reddit import (
     RedditAccountProfile,
     RedditComment,
     RedditCommunity,
-    RedditKeyword,
     RedditPost,
 )
 
@@ -252,6 +251,7 @@ def check_comment_publish(
     site_id: int,
     account_id: int,
     body: str,
+    exclude_comment_id: int | None = None,
 ) -> RiskReport:
     """评论发布前风控校验。"""
     errors: list[str] = []
@@ -274,6 +274,7 @@ def check_comment_publish(
         .filter(
             RedditComment.account_id == account_id,
             RedditComment.created_at >= week_ago,
+            RedditComment.id != (exclude_comment_id or 0),
         )
         .all()
     )
@@ -297,130 +298,3 @@ def ensure_karma_stage_consistency(db: Session, profile: RedditAccountProfile) -
         profile.stage = "ready"
     elif profile.stage == "ready" and profile.karma >= KARMA_FULL_THRESHOLD:
         profile.stage = "active"
-
-
-# ============ 预置数据 ============
-DEFAULT_COMMUNITIES: list[dict] = [
-    # 核心垂直社区（方案 第三章-2）
-    {"name": "BabyMonitoring", "category": "core", "priority": 1, "best_hour_utc": 14,
-     "rules_note": "低辐射监护器核心社区，允许讨论产品"},
-    {"name": "Parenting", "category": "core", "priority": 1, "best_hour_utc": 14,
-     "rules_note": "大社区，禁止硬广，外链需高度场景化", "allows_links": True},
-    {"name": "NewParents", "category": "core", "priority": 1, "best_hour_utc": 15,
-     "rules_note": "新手父母答疑为主，禁止纯商家内容"},
-    {"name": "BabyGear", "category": "core", "priority": 2, "best_hour_utc": 13,
-     "rules_note": "装备测评社区，允许测评帖带链接"},
-    {"name": "ScienceBasedParenting", "category": "core", "priority": 2, "best_hour_utc": 16,
-     "rules_note": "需引用数据来源，禁营销"},
-    # 长尾场景社区
-    {"name": "WorkingMoms", "category": "longtail", "purpose": "persona", "priority": 2, "best_hour_utc": 12,
-     "rules_note": "职场妈妈场景，穿戴设备话题友好"},
-    {"name": "HomeSafety", "category": "longtail", "priority": 3, "best_hour_utc": 15,
-     "rules_note": "居家安全话题，禁硬广"},
-    {"name": "EMFSafety", "category": "longtail", "priority": 2, "best_hour_utc": 17,
-     "rules_note": "低辐射需求核心场景社区"},
-    {"name": "Breastfeeding", "category": "longtail", "priority": 2, "best_hour_utc": 13,
-     "rules_note": "吸奶器话题社区，仅周末允许自推广", "promo_weekday": 5},
-]
-
-DEFAULT_KEYWORDS: list[dict] = [
-    # SEO 适配词库
-    {"keyword": "low EMF baby monitor", "category": "seo", "priority": 1},
-    {"keyword": "non-wifi baby monitor", "category": "seo", "priority": 1},
-    {"keyword": "wearable breast pump", "category": "seo", "priority": 1},
-    {"keyword": "baby monitor without internet", "category": "seo", "priority": 2},
-    {"keyword": "analog baby monitor", "category": "seo", "priority": 2},
-    {"keyword": "video baby monitor no wifi", "category": "seo", "priority": 2},
-    {"keyword": "hands free breast pump", "category": "seo", "priority": 2},
-    {"keyword": "baby monitor radiation distance", "category": "seo", "priority": 3},
-    # AI 热搜词库
-    {"keyword": "best low radiation baby monitor", "category": "ai_hot", "priority": 1},
-    {"keyword": "safe baby monitor for newborn", "category": "ai_hot", "priority": 1},
-    {"keyword": "wearable breast pump review", "category": "ai_hot", "priority": 1},
-    {"keyword": "are wifi baby monitors safe", "category": "ai_hot", "priority": 1},
-    {"keyword": "lowest EMF baby monitor 2026", "category": "ai_hot", "priority": 2},
-    {"keyword": "baby monitor EMF safety guide", "category": "ai_hot", "priority": 2},
-    {"keyword": "best baby monitor for preemie", "category": "ai_hot", "priority": 3},
-]
-
-
-def seed_default_communities(db: Session, site_id: int, account_id: int | None = None) -> int:
-    """预置兴趣社区模板。人设社区必须挂到 account_id；产品社区仍全站共用。"""
-    persona_names = {
-        c.name
-        for c in db.query(RedditCommunity)
-        .filter(
-            RedditCommunity.site_id == site_id,
-            RedditCommunity.purpose == "persona",
-            RedditCommunity.account_id == account_id,
-        )
-        .all()
-    } if account_id else set()
-    promo_names = {
-        c.name
-        for c in db.query(RedditCommunity)
-        .filter(
-            RedditCommunity.site_id == site_id,
-            RedditCommunity.purpose == "promo",
-            RedditCommunity.account_id.is_(None),
-        )
-        .all()
-    }
-    added = 0
-    for item in DEFAULT_COMMUNITIES:
-        purpose = item.get("purpose", "persona")
-        name = item["name"]
-        if purpose == "persona":
-            if not account_id or name in persona_names:
-                continue
-            owner = account_id
-            persona_names.add(name)
-        else:
-            if name in promo_names:
-                continue
-            owner = None
-            promo_names.add(name)
-        db.add(
-            RedditCommunity(
-                site_id=site_id,
-                account_id=owner,
-                name=name,
-                category=item.get("category", "core"),
-                purpose=purpose,
-                rules_note=item.get("rules_note"),
-                allows_links=item.get("allows_links", True),
-                promo_weekday=item.get("promo_weekday"),
-                daily_post_limit=item.get("daily_post_limit", 1),
-                best_hour_utc=item.get("best_hour_utc"),
-                priority=item.get("priority", 3),
-                is_active=True,
-            )
-        )
-        added += 1
-    db.commit()
-    return added
-
-
-def seed_default_keywords(db: Session, site_id: int) -> int:
-    """预置 SEO + AI 热搜双词库。返回新增数量。"""
-    existing = {
-        (k.keyword, k.category)
-        for k in db.query(RedditKeyword).filter(RedditKeyword.site_id == site_id).all()
-    }
-    added = 0
-    for item in DEFAULT_KEYWORDS:
-        key = (item["keyword"], item["category"])
-        if key in existing:
-            continue
-        db.add(
-            RedditKeyword(
-                site_id=site_id,
-                keyword=item["keyword"],
-                category=item["category"],
-                priority=item.get("priority", 3),
-                used_count=0,
-            )
-        )
-        added += 1
-    db.commit()
-    return added

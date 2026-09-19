@@ -66,22 +66,66 @@
           <el-col :span="10">
             <el-form label-position="top">
               <el-form-item label="帖子类型">
-                <el-radio-group v-model="postForm.post_type">
-                  <el-radio value="consultation">痛点答疑</el-radio>
-                  <el-radio value="experience">真实测评</el-radio>
-                  <el-radio value="comparison">竞品对比</el-radio>
+                <el-radio-group v-model="postForm.post_type" class="post-type-radios">
+                  <el-radio v-for="opt in postTypeOptions" :key="opt.value" :value="opt.value">
+                    <span class="post-type-label">
+                      {{ opt.label }}
+                      <el-popover placement="bottom-start" :width="340" trigger="hover" :show-after="200">
+                        <template #reference>
+                          <el-icon class="post-type-help" @click.stop.prevent>
+                            <QuestionFilled />
+                          </el-icon>
+                        </template>
+                        <div class="post-type-help-body">
+                          <p class="help-title">{{ opt.label }}</p>
+                          <p>{{ opt.desc }}</p>
+                          <p><span class="help-k">标题例</span>{{ opt.exampleTitle }}</p>
+                          <p><span class="help-k">写法</span>{{ opt.exampleTip }}</p>
+                          <p v-if="opt.productNote" class="help-warn">{{ opt.productNote }}</p>
+                        </div>
+                      </el-popover>
+                    </span>
+                  </el-radio>
                 </el-radio-group>
+                <p class="muted" style="margin: 6px 0 0">偏 Reddit 原生语气；树洞/求助主帖不提产品。点类型旁 ? 看说明与例子。</p>
               </el-form-item>
-              <el-form-item label="产品社区">
-                <el-select v-model="postForm.subreddit" filterable allow-create default-first-option placeholder="从产品社区选，或手填" style="width: 100%">
-                  <el-option v-for="c in promoCommunities" :key="c.id" :label="`r/${c.name}`" :value="c.name" />
+              <el-form-item label="目标社区">
+                <el-select
+                  v-model="postForm.subreddit"
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="优先人设社区；约 9 成人设、1 成产品"
+                  style="width: 100%"
+                >
+                  <el-option-group v-if="personaCommunities.length" label="人设社区（推荐，计为闲聊）">
+                    <el-option
+                      v-for="c in personaCommunities"
+                      :key="`p-${c.id}`"
+                      :label="`r/${c.name}`"
+                      :value="c.name"
+                    />
+                  </el-option-group>
+                  <el-option-group v-if="promoCommunities.length" label="产品社区（≤10% 配额）">
+                    <el-option
+                      v-for="c in promoCommunities"
+                      :key="`m-${c.id}`"
+                      :label="`r/${c.name}`"
+                      :value="c.name"
+                    />
+                  </el-option-group>
                 </el-select>
+                <p class="muted" style="margin: 6px 0 0">
+                  与评论同一 90/10 原则：生成不拦；发布时选产品社区或带站点链接会计入产品配额。
+                  <span v-if="overview">近 7 天产品占比 {{ mixPromoPercent }}%</span>
+                </p>
               </el-form-item>
-              <el-form-item label="主题关键词">
-                <el-input v-model="postForm.keyword" placeholder="可从产品卖点带出，仍可改" />
+              <el-form-item label="主题关键词（可选）">
+                <el-input v-model="postForm.keyword" placeholder="可选；不填则按帖子类型与目标社区自由发挥" />
               </el-form-item>
-              <el-form-item v-if="postForm.post_type === 'experience'" label="带入站点链接">
+              <el-form-item v-if="postForm.post_type === 'pitfall' || postForm.post_type === 'guide'" label="带入站点链接">
                 <el-switch v-model="postForm.include_site_url" />
+                <span class="muted" style="margin-left: 8px">仅踩坑/干货可选；建议仅软提名称</span>
               </el-form-item>
               <el-button type="primary" :loading="postGenerating" :disabled="!selectedAccountId" @click="handleGeneratePost">
                 AI 生成并入审核队列
@@ -143,7 +187,7 @@
         <el-tabs v-model="commentInputTab" type="border-card">
           <el-tab-pane label="智能发现" name="smart">
             <p class="muted" style="margin-bottom: 12px">
-              按人设社区拉取最近讨论，约 90% 闲聊、10% 进产品版块。产品向评论需指定品牌+产品。
+              按人设社区拉闲聊；约 10% 产品向评论只进入「当前产品已绑定」的产品社区。请先在品牌产品库为产品勾选社区。
               <router-link to="/brands">管理品牌产品库</router-link>
             </p>
             <el-form label-position="top" style="max-width: 560px; margin-bottom: 12px">
@@ -278,6 +322,120 @@
         </el-table>
       </el-tab-pane>
 
+      <!-- 养号互动 -->
+      <el-tab-pane label="养号互动" name="engage">
+        <p class="muted" style="margin: 0 0 12px">
+          从人设/产品社区拉帖，展开评论后可单赞或勾选批量赞（条目间自动间隔 3–8 秒）。每次最多拉 8 条评论。须人工勾选，勿无人值守刷赞。
+        </p>
+        <el-form inline>
+          <el-form-item label="社区">
+            <el-select
+              v-model="engageSubreddit"
+              filterable
+              placeholder="选择社区"
+              style="width: 240px"
+            >
+              <el-option-group v-if="personaCommunities.length" label="人设社区">
+                <el-option
+                  v-for="c in personaCommunities"
+                  :key="`eg-p-${c.id}`"
+                  :label="`r/${c.name}`"
+                  :value="c.name"
+                />
+              </el-option-group>
+              <el-option-group v-if="promoCommunities.length" label="产品社区">
+                <el-option
+                  v-for="c in promoCommunities"
+                  :key="`eg-m-${c.id}`"
+                  :label="`r/${c.name}`"
+                  :value="c.name"
+                />
+              </el-option-group>
+            </el-select>
+          </el-form-item>
+          <el-form-item>
+            <el-button type="primary" :loading="engageLoading" :disabled="!selectedAccountId || !engageSubreddit" @click="loadEngageFeed">
+              拉取新帖
+            </el-button>
+            <el-button
+              type="success"
+              :loading="engageVoting"
+              :disabled="!engageSelectedIds.length || engageVoting"
+              @click="upvoteSelectedEngage"
+            >
+              赞选中（{{ engageSelectedIds.length }}）
+            </el-button>
+          </el-form-item>
+        </el-form>
+        <p v-if="engageProgress" class="muted" style="margin: 0 0 8px">{{ engageProgress }}</p>
+        <el-table
+          :data="engagePosts"
+          v-loading="engageLoading"
+          size="small"
+          stripe
+          max-height="420"
+          row-key="thing_id"
+          @selection-change="onEngagePostSelection"
+          @expand-change="onEngageExpand"
+        >
+          <el-table-column type="selection" width="40" :selectable="() => !engageVoting" />
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div style="padding: 8px 12px 12px 48px">
+                <div class="list-header" style="margin-bottom: 6px">
+                  <span>评论</span>
+                  <el-button size="small" :loading="row._commentsLoading" @click="loadEngageComments(row)">刷新评论</el-button>
+                </div>
+                <el-table
+                  v-if="row._comments?.length"
+                  :data="row._comments"
+                  size="small"
+                  max-height="240"
+                  @selection-change="(rows) => onEngageCommentSelection(row.thing_id, rows)"
+                >
+                  <el-table-column type="selection" width="40" :selectable="() => !engageVoting" />
+                  <el-table-column prop="author" label="作者" width="100" show-overflow-tooltip />
+                  <el-table-column prop="body" label="内容" min-width="220" show-overflow-tooltip />
+                  <el-table-column prop="score" label="分" width="56" />
+                  <el-table-column label="操作" width="80">
+                    <template #default="{ row: c }">
+                      <el-button
+                        size="small"
+                        type="primary"
+                        link
+                        :disabled="engageVoting || !!engageVoted[c.thing_id]"
+                        @click="upvoteOne(c.thing_id)"
+                      >
+                        {{ engageVoted[c.thing_id] ? '已赞' : '赞' }}
+                      </el-button>
+                    </template>
+                  </el-table-column>
+                </el-table>
+                <p v-else class="muted" style="margin: 0">{{ row._commentsLoaded ? '暂无评论' : '点「评论」或展开后点「刷新评论」加载' }}</p>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column prop="title" label="标题" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="score" label="分" width="56" />
+          <el-table-column prop="num_comments" label="评" width="56" />
+          <el-table-column label="操作" width="140" fixed="right">
+            <template #default="{ row }">
+              <el-button size="small" link type="primary" @click="loadEngageComments(row)">评论</el-button>
+              <el-button
+                size="small"
+                link
+                type="success"
+                :disabled="engageVoting || !!engageVoted[row.thing_id]"
+                @click="upvoteOne(row.thing_id)"
+              >
+                {{ engageVoted[row.thing_id] ? '已赞' : '赞' }}
+              </el-button>
+              <el-link v-if="row.url" :href="row.url" target="_blank" type="info" style="margin-left: 6px; font-size: 12px">打开</el-link>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
       <!-- 账号矩阵 -->
       <el-tab-pane label="账号矩阵" name="accounts">
         <div class="list-header">
@@ -324,7 +482,6 @@
           <span>人设社区只属于当前账号；产品社区全站共用</span>
           <div>
             <el-button size="small" :loading="suggesting" @click="handleSuggestCommunities">按人设建议社区</el-button>
-            <el-button size="small" type="primary" plain :loading="seeding" @click="handleSeed">可选兴趣模板</el-button>
             <el-button size="small" type="primary" @click="openCommunityEdit()">新增社区</el-button>
           </div>
         </div>
@@ -595,6 +752,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { QuestionFilled } from '@element-plus/icons-vue'
 import {
   getRedditStatus,
   generateRedditPost, listRedditPosts, updateRedditPost, approveRedditPost, publishRedditPost, deleteRedditPost,
@@ -602,15 +760,17 @@ import {
   updateRedditComment, approveRedditComment, publishRedditComment, deleteRedditComment,
   searchRedditPosts,
   getRedditOverview, listAccountProfiles, updateAccountProfile,
-  listCommunities, seedRedditDefaults, createCommunity, updateCommunity, deleteCommunity,
+  listCommunities, createCommunity, updateCommunity, deleteCommunity,
   listRedditKeywords, createRedditKeyword, updateRedditKeywordRow, deleteRedditKeywordRow,
   scheduleRedditPost, cancelRedditPostSchedule, syncPostMetrics,
   rejectRedditPost, rejectRedditComment, scheduleRedditComment, cancelRedditCommentSchedule,
   suggestPersonaCommunities, listBrands, smartDiscoverReddit,
+  fetchEngageFeed, fetchEngageComments, upvoteRedditThing,
   type RedditStatus, type RedditPost, type RedditComment, type RedditDiscoverItem,
   type RedditAccount, type PostType,
   type RedditOverview, type RedditCommunity, type RedditKeyword,
   type RedditBrand, type RedditBrandProduct,
+  type RedditEngageComment,
 } from '@/api/reddit'
 
 const route = useRoute()
@@ -619,6 +779,12 @@ const selectedAccountId = ref<number | null>(null)
 const innerTab = ref('posts')
 const overview = ref<RedditOverview | null>(null)
 const promoCommunities = computed(() => communities.value.filter((c) => c.purpose === 'promo' && c.is_active))
+const personaCommunities = computed(() => communities.value.filter((c) => c.purpose === 'persona' && c.is_active))
+const mixPromoPercent = computed(() => {
+  const r = overview.value?.promo_ratio_7d
+  if (r == null || Number.isNaN(Number(r))) return '0'
+  return (Number(r) * 100).toFixed(1)
+})
 
 const brands = ref<RedditBrand[]>([])
 const selectedBrandId = ref<number | null>(null)
@@ -630,6 +796,127 @@ const productsOfSelectedBrand = computed(() => {
 })
 const suggesting = ref(false)
 const smartDiscovering = ref(false)
+
+// ===== 养号互动 =====
+type EngagePostRow = RedditDiscoverItem & {
+  _comments?: RedditEngageComment[]
+  _commentsLoading?: boolean
+  _commentsLoaded?: boolean
+}
+const engageSubreddit = ref('')
+const engagePosts = ref<EngagePostRow[]>([])
+const engageLoading = ref(false)
+const engageVoting = ref(false)
+const engageProgress = ref('')
+const engageVoted = reactive<Record<string, boolean>>({})
+const engageSelectedPostIds = ref<string[]>([])
+const engageSelectedCommentIds = ref<string[]>([])
+const engageSelectedIds = computed(() => {
+  const set = new Set([...engageSelectedPostIds.value, ...engageSelectedCommentIds.value])
+  return [...set].filter((id) => !engageVoted[id])
+})
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+function onEngagePostSelection(rows: EngagePostRow[]) {
+  engageSelectedPostIds.value = rows.map((r) => r.thing_id)
+}
+
+function onEngageCommentSelection(postThingId: string, rows: RedditEngageComment[]) {
+  const other = engageSelectedCommentIds.value.filter((id) => {
+    const post = engagePosts.value.find((p) => p.thing_id === postThingId)
+    return !(post?._comments || []).some((c) => c.thing_id === id)
+  })
+  engageSelectedCommentIds.value = [...other, ...rows.map((r) => r.thing_id)]
+}
+
+async function loadEngageFeed() {
+  if (!selectedAccountId.value || !engageSubreddit.value) return
+  engageLoading.value = true
+  engageProgress.value = ''
+  engageSelectedPostIds.value = []
+  engageSelectedCommentIds.value = []
+  try {
+    const res = await fetchEngageFeed({
+      account_id: selectedAccountId.value,
+      subreddit: engageSubreddit.value,
+      limit: 15,
+    })
+    engagePosts.value = (res.items || []).map((p) => ({ ...p }))
+  } finally {
+    engageLoading.value = false
+  }
+}
+
+async function loadEngageComments(row: EngagePostRow) {
+  if (!selectedAccountId.value) return
+  row._commentsLoading = true
+  try {
+    const res = await fetchEngageComments({
+      account_id: selectedAccountId.value,
+      thing_id: row.thing_id,
+      subreddit: row.subreddit || engageSubreddit.value,
+      limit: 8,
+    })
+    row._comments = res.items || []
+    row._commentsLoaded = true
+  } finally {
+    row._commentsLoading = false
+  }
+}
+
+function onEngageExpand(row: EngagePostRow, expandedRows: EngagePostRow[]) {
+  if (expandedRows.some((r) => r.thing_id === row.thing_id) && !row._commentsLoaded) {
+    loadEngageComments(row)
+  }
+}
+
+async function upvoteOne(thingId: string) {
+  if (!selectedAccountId.value || engageVoted[thingId]) return
+  try {
+    await upvoteRedditThing({ account_id: selectedAccountId.value, thing_id: thingId, direction: 1 })
+    engageVoted[thingId] = true
+    ElMessage.success('已点赞')
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || '点赞失败')
+  }
+}
+
+async function upvoteSelectedEngage() {
+  if (!selectedAccountId.value) return
+  const ids = engageSelectedIds.value.slice(0, 20)
+  if (!ids.length) {
+    ElMessage.warning('请先勾选帖子或评论')
+    return
+  }
+  engageVoting.value = true
+  let ok = 0
+  let fail = 0
+  try {
+    for (let i = 0; i < ids.length; i++) {
+      const tid = ids[i]
+      engageProgress.value = `点赞中 ${i + 1}/${ids.length}…`
+      try {
+        await upvoteRedditThing({ account_id: selectedAccountId.value, thing_id: tid, direction: 1 })
+        engageVoted[tid] = true
+        ok += 1
+      } catch {
+        fail += 1
+      }
+      if (i < ids.length - 1) {
+        const wait = 3000 + Math.floor(Math.random() * 5000)
+        engageProgress.value = `间隔 ${Math.round(wait / 1000)}s 后继续（${i + 1}/${ids.length}）`
+        await sleep(wait)
+      }
+    }
+    ElMessage.success(`完成：成功 ${ok}，失败 ${fail}`)
+  } finally {
+    engageVoting.value = false
+    engageProgress.value = ''
+  }
+}
 
 // ===== 账号矩阵 =====
 const profiles = ref<RedditAccount[]>([])
@@ -645,7 +932,6 @@ const profileForm = reactive({
 // ===== 社区库 =====
 const communities = ref<RedditCommunity[]>([])
 const communitiesLoading = ref(false)
-const seeding = ref(false)
 const communityDialog = ref(false)
 const communitySaving = ref(false)
 const weekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
@@ -671,8 +957,55 @@ let scheduleTargetPost: RedditPost | null = null
 let scheduleTargetComment: RedditComment | null = null
 
 const postForm = reactive<{ post_type: PostType; subreddit: string; keyword: string; include_site_url: boolean }>({
-  post_type: 'consultation', subreddit: '', keyword: '', include_site_url: false,
+  post_type: 'pitfall', subreddit: '', keyword: '', include_site_url: false,
 })
+
+const postTypeOptions: {
+  value: PostType
+  label: string
+  desc: string
+  exampleTitle: string
+  exampleTip: string
+  productNote?: string
+}[] = [
+  {
+    value: 'pitfall',
+    label: '踩坑避雷',
+    desc: '先大篇幅吐槽交智商税、试烂货的倒霉经历，产品只作为“后来意外找到的解法”轻轻出现，并带一点小槽点。',
+    exampleTitle: 'Don’t buy XXX — I wasted $300 on this…',
+    exampleTip: '重点写前面踩坑细节与情绪；结尾轻提解决方案，再问大家有没有类似经历。',
+  },
+  {
+    value: 'vent',
+    label: '深夜树洞',
+    desc: '谈压力、焦虑、生活状态等情绪问题，拉近距离。像真实有烦恼的人，而不是品牌号。',
+    exampleTitle: 'Burning out — how do you even deal with XXX?',
+    exampleTip: '只倾诉和提问；产品留给评论区再用养号号轻提。',
+    productNote: '主帖禁止提任何品牌/产品/链接。',
+  },
+  {
+    value: 'unpopular',
+    label: '逆反暴论',
+    desc: '抛出一个稍反直觉、可辩论的观点，吸引讨论；在争论中自然暴露自己最终的选择。',
+    exampleTitle: 'Unpopular opinion: you don’t need fancy XXX features',
+    exampleTip: '语气带点脾气但别极端；结尾邀请反驳，别写成软文。',
+  },
+  {
+    value: 'guide',
+    label: '硬核干货',
+    desc: '伪装成发烧友整理的资源清单/指南，利他分享。你的产品排在第 3–4 位，客观一句带过。',
+    exampleTitle: 'Spent 3 days compiling an XXX checklist / resource list',
+    exampleTip: '不要吹第一名；最好只写名称不放追踪链接，让人自己搜。',
+  },
+  {
+    value: 'help_seek',
+    label: '场景求助',
+    desc: '用极细分场景求推荐，利用“好为人师”。主帖只描述需求和失败尝试，不自答产品。',
+    exampleTitle: 'Anyone know an XXX that works for [very specific scenario]?',
+    exampleTip: '写清预算/限制，并说明试过 A/B 为何不行；产品可留给评论区或小号互动。',
+    productNote: '主帖禁止点名自家产品。',
+  },
+]
 const posts = ref<RedditPost[]>([])
 const postsLoading = ref(false)
 const postGenerating = ref(false)
@@ -739,15 +1072,29 @@ async function loadPosts() {
 
 async function handleGeneratePost() {
   if (!selectedAccountId.value) { ElMessage.warning('请选择 Reddit 账号'); return }
-  if (!postForm.subreddit) { ElMessage.warning('请选择或填写产品社区'); return }
-  if (!postForm.keyword) {
-    const p = productsOfSelectedBrand.value[0]
-    postForm.keyword = (p?.talking_points || [])[0] || p?.category || p?.name || selectedBrandName() || ''
+  if (!postForm.subreddit) { ElMessage.warning('请选择或填写目标社区（优先人设社区）'); return }
+  const sr = postForm.subreddit.replace(/^r\//i, '').toLowerCase()
+  const memeSubs = new Set(['dankmemes', 'memes', 'me_irl', 'shitposting', 'okbuddyretard', 'comedyheaven'])
+  if (memeSubs.has(sr)) {
+    try {
+      await ElMessageBox.confirm(
+        `r/${sr} 偏梗图/沙雕，不太适合长文踩坑/干货。确定仍要生成吗？更建议换到与关键词相关的人设或产品社区。`,
+        '版块可能不匹配',
+        { type: 'warning', confirmButtonText: '仍要生成', cancelButtonText: '换社区' },
+      )
+    } catch {
+      return
+    }
   }
-  if (!postForm.keyword) { ElMessage.warning('请填写主题关键词'); return }
   postGenerating.value = true
   try {
-    await generateRedditPost({ account_id: selectedAccountId.value, ...postForm })
+    await generateRedditPost({
+      account_id: selectedAccountId.value,
+      post_type: postForm.post_type,
+      subreddit: postForm.subreddit,
+      keyword: (postForm.keyword || '').trim(),
+      include_site_url: postForm.include_site_url,
+    })
     ElMessage.success('已生成，请在审核队列中编辑/批准')
     loadPosts()
   } finally { postGenerating.value = false }
@@ -959,7 +1306,16 @@ function statusTag(s: string): any {
   return { pending_review: 'warning', approved: 'primary', posted: 'success', failed: 'danger' }[s] || 'info'
 }
 function postTypeLabel(t: string) {
-  return { consultation: '答疑', experience: '测评', comparison: '对比' }[t] || t
+  return {
+    pitfall: '踩坑',
+    vent: '树洞',
+    unpopular: '暴论',
+    guide: '干货',
+    help_seek: '求助',
+    consultation: '答疑',
+    experience: '测评',
+    comparison: '对比',
+  }[t] || t
 }
 function formatTime(s?: string | null) {
   if (!s) return '—'
@@ -1088,16 +1444,6 @@ async function handleSuggestCommunities() {
     ElMessage.success(`建议 ${r.suggested.length} 个社区，新增 ${r.added} 个`)
     await loadCommunities()
   } finally { suggesting.value = false }
-}
-
-async function handleSeed() {
-  if (!selectedAccountId.value) { ElMessage.warning('请先选择 Reddit 账号'); return }
-  seeding.value = true
-  try {
-    const r = await seedRedditDefaults(selectedAccountId.value)
-    ElMessage.success(`已加入 ${r.communities_added} 个人设社区、${r.keywords_added} 个关键词`)
-    await Promise.all([loadCommunities(), loadKeywords()])
-  } finally { seeding.value = false }
 }
 
 function openCommunityEdit(row?: RedditCommunity) {
@@ -1260,6 +1606,12 @@ function onTabChange(name: string | number) {
   if (name === 'accounts' && !profiles.value.length) loadProfiles()
   if (name === 'communities' && !communities.value.length) loadCommunities()
   if (name === 'keywords' && !keywords.value.length) loadKeywords()
+  if (name === 'engage') {
+    if (!communities.value.length) loadCommunities()
+    if (!engageSubreddit.value) {
+      engageSubreddit.value = personaCommunities.value[0]?.name || promoCommunities.value[0]?.name || ''
+    }
+  }
 }
 </script>
 
@@ -1274,4 +1626,37 @@ function onTabChange(name: string | number) {
 .stat-label { font-size: 12px; color: #909399; }
 .stat-danger { color: #f56c6c; }
 .muted { color: #909399; }
+.post-type-radios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+}
+.post-type-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.post-type-help {
+  color: #909399;
+  cursor: help;
+  font-size: 14px;
+  vertical-align: middle;
+}
+.post-type-help:hover { color: #409eff; }
+.post-type-help-body {
+  font-size: 13px;
+  line-height: 1.55;
+  color: #303133;
+  p { margin: 0 0 8px; }
+  p:last-child { margin-bottom: 0; }
+  .help-title { font-weight: 600; margin-bottom: 6px; }
+  .help-k {
+    display: inline-block;
+    min-width: 3em;
+    color: #909399;
+    margin-right: 4px;
+  }
+  .help-warn { color: #e6a23c; }
+}
 </style>

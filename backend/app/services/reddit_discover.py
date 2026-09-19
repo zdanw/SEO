@@ -10,7 +10,6 @@ from typing import Callable
 from sqlalchemy.orm import Session
 
 from app.services.reddit_client import normalize_subreddit
-from app.services.reddit_mix import can_enqueue_promo, count_mix_window
 
 QUESTION_RE = re.compile(r"\?|\bhelp\b|\banyone\b|\badvice\b", re.IGNORECASE)
 MAX_AGE_HOURS = 48
@@ -26,6 +25,25 @@ INTEREST_FALLBACK: dict[str, list[str]] = {
     "safety": ["HomeSafety", "TwoXChromosomes"],
     "fitness": ["xxfitness", "bodyweightfitness"],
 }
+
+
+def promo_names_for_product(
+    active_promo: list[str],
+    bound_names: set[str] | None,
+) -> list[str]:
+    """Intersect site promo communities with product-bound names. No binding → empty."""
+    if not bound_names:
+        return []
+    bound_l = {normalize_subreddit(n).lower() for n in bound_names if n}
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in active_promo:
+        sr = normalize_subreddit(name)
+        key = sr.lower()
+        if key in bound_l and key not in seen:
+            seen.add(key)
+            out.append(sr)
+    return out
 
 
 def pick_discover_targets(
@@ -191,6 +209,23 @@ def run_smart_discover(
     return {"queued": queued, "skipped": skipped, "errors": errors, "last_error": last_error, "reason": reason}
 
 
+def _refresh_stale_communities(db: Session, rows: list) -> list:
+    """缓存过期则同步刷新；只返回仍 is_active 的行。"""
+    from app.services.reddit_community_verify import is_verify_fresh, verify_community_row
+
+    kept = []
+    dirty = False
+    for row in rows:
+        if not is_verify_fresh(row):
+            verify_community_row(row, force=True)
+            dirty = True
+        if row.is_active and row.exists is not False:
+            kept.append(row)
+    if dirty:
+        db.commit()
+    return kept
+
+
 def smart_discover_for_account(
     db: Session,
     *,
@@ -200,10 +235,12 @@ def smart_discover_for_account(
     search_posts,
     remaining_slots: int,
     seed: int | None = None,
+    product_id: int | None = None,
 ) -> dict:
-    from app.models.reddit import RedditComment, RedditCommunity
+    from app.models.reddit import RedditComment, RedditCommunity, RedditProduct
 
-    persona_rows = (
+    persona_rows = _refresh_stale_communities(
+        db,
         db.query(RedditCommunity)
         .filter(
             RedditCommunity.site_id == site_id,
@@ -211,17 +248,31 @@ def smart_discover_for_account(
             RedditCommunity.purpose == "persona",
             RedditCommunity.account_id == account_id,
         )
-        .all()
+        .all(),
     )
-    promo_rows = (
+    promo_rows = _refresh_stale_communities(
+        db,
         db.query(RedditCommunity)
         .filter(
             RedditCommunity.site_id == site_id,
             RedditCommunity.is_active.is_(True),
             RedditCommunity.purpose == "promo",
         )
-        .all()
+        .all(),
     )
+    promo_names = [r.name for r in promo_rows]
+    if product_id:
+        product = (
+            db.query(RedditProduct)
+            .filter(RedditProduct.id == product_id, RedditProduct.is_active.is_(True))
+            .first()
+        )
+        bound = {c.name for c in (product.communities or [])} if product else set()
+        promo_names = promo_names_for_product(promo_names, bound)
+    else:
+        # 未指定产品：不抽产品社区，避免社区与卖点错配
+        promo_names = []
+
     commented = {
         row[0]
         for row in db.query(RedditComment.target_post_url)
@@ -229,15 +280,15 @@ def smart_discover_for_account(
         .all()
         if row[0]
     }
-    mix = count_mix_window(db, site_id)
-    allow_promo = can_enqueue_promo(casual_count=mix.casual, promo_count=mix.promo)
+    # 生成阶段不拦配额；发布时由 publish 路径 enforce_promo_quota
+    allow_promo = bool(promo_names)
 
     def _gen(item: dict, intent: str) -> None:
         generate_comment(item, intent)
 
     return run_smart_discover(
         persona_communities=[r.name for r in persona_rows],
-        promo_communities=[r.name for r in promo_rows],
+        promo_communities=promo_names,
         already_commented=commented,
         search_fn=search_posts,
         generate_fn=_gen,

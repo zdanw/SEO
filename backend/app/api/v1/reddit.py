@@ -39,6 +39,9 @@ from app.schemas.reddit import (
     RedditDiscoverItem,
     RedditDiscoverMeta,
     RedditDiscoverResponse,
+    RedditEngageCommentOut,
+    RedditEngageCommentsOut,
+    RedditEngageFeedOut,
     RedditKeywordCreate,
     RedditKeywordOut,
     RedditKeywordUpdate,
@@ -51,11 +54,12 @@ from app.schemas.reddit import (
     RedditProductOut,
     RedditProductUpdate,
     RedditScheduleIn,
-    RedditSeedOut,
     RedditSmartDiscoverIn,
     RedditPostUpdate,
     RedditStatusOut,
     RedditAccountOut,
+    RedditVoteIn,
+    RedditVoteOut,
     ZernioKeyCreate,
     ZernioKeyOut,
     ZernioKeyUpdate,
@@ -68,8 +72,18 @@ from app.services.reddit_client import (
     parse_reddit_post_url,
 )
 from app.services.reddit_content import generate_comment_pipeline
+from app.services.reddit_community_verify import (
+    apply_verify_to_community,
+    verify_subreddit,
+    verify_subreddits_with_feed_llm,
+)
 from app.services.reddit_discover import smart_discover_for_account, suggest_persona_subreddits
-from app.services.reddit_mix import MixQuotaExceeded, count_mix_window, resolve_intent
+from app.services.reddit_mix import (
+    MixQuotaExceeded,
+    count_mix_window,
+    resolve_intent,
+    resolve_post_intent,
+)
 from app.services.reddit_persona import parse_persona
 from app.services import reddit_oauth
 from app.services.reddit_publish import publish_comment_now, publish_post_now
@@ -80,8 +94,6 @@ from app.services.reddit_risk import (
     ensure_karma_stage_consistency,
     get_or_create_profile,
     get_account_daily_usage,
-    seed_default_communities,
-    seed_default_keywords,
 )
 from app.services.zernio_client import ZernioError
 from app.services.zernio_keys import is_zernio_ready, list_all_keys, list_enabled_keys, mask_api_key
@@ -184,18 +196,52 @@ def _fill_comment_out(db: Session, comment: RedditComment) -> RedditComment:
     return comment
 
 
+def _product_out(product: RedditProduct) -> RedditProductOut:
+    communities = sorted(product.communities or [], key=lambda c: c.id)
+    return RedditProductOut(
+        id=product.id,
+        brand_id=product.brand_id,
+        name=product.name,
+        category=product.category or "",
+        talking_points=product.talking_points or [],
+        is_active=product.is_active,
+        community_ids=[c.id for c in communities],
+        community_names=[c.name for c in communities],
+        created_at=product.created_at,
+        updated_at=product.updated_at,
+    )
+
+
+def _set_product_communities(
+    db: Session,
+    *,
+    site_id: int,
+    product: RedditProduct,
+    community_ids: list[int],
+) -> None:
+    ids = sorted({int(i) for i in community_ids if i})
+    if not ids:
+        product.communities = []
+        return
+    rows = (
+        db.query(RedditCommunity)
+        .filter(
+            RedditCommunity.site_id == site_id,
+            RedditCommunity.id.in_(ids),
+            RedditCommunity.purpose == "promo",
+        )
+        .all()
+    )
+    if len(rows) != len(ids):
+        found = {r.id for r in rows}
+        missing = [i for i in ids if i not in found]
+        raise HTTPException(status_code=400, detail=f"只能绑定本站产品社区，无效 id: {missing}")
+    product.communities = rows
+
+
 def _brand_out(brand: RedditBrand) -> RedditBrandOut:
     products = [
-        RedditProductOut(
-            id=p.id,
-            brand_id=p.brand_id,
-            name=p.name,
-            category=p.category or "",
-            talking_points=p.talking_points or [],
-            is_active=p.is_active,
-            created_at=p.created_at,
-            updated_at=p.updated_at,
-        )
+        _product_out(p)
         for p in sorted(brand.products or [], key=lambda x: x.id)
     ]
     return RedditBrandOut(
@@ -213,11 +259,15 @@ def _raise_reddit_upstream(exc: RedditApiError) -> None:
     status_code = exc.status_code or 502
     retry_after = exc.retry_after
     if status_code == 429:
+        # Zernio/Reddit 共享配额：搜索、拉评论、投票都可能 429，文案勿写死成「搜索」
+        upstream = str(exc).strip()
         if retry_after:
             minutes = max(1, (retry_after + 59) // 60)
-            detail = f"Reddit 搜索次数已达上限，请约 {minutes} 分钟后再试"
+            detail = f"Reddit 请求过于频繁（上游限流），请约 {minutes} 分钟后再试"
         else:
-            detail = "Reddit 搜索次数已达上限，请稍后再试"
+            detail = "Reddit 请求过于频繁（上游限流），请稍后再试"
+        if upstream and "429" not in upstream:
+            detail = f"{detail}：{upstream[:160]}"
         headers = {"Retry-After": str(retry_after)} if retry_after else None
         raise HTTPException(status_code=429, detail=detail, headers=headers)
     if 400 <= status_code < 500:
@@ -436,22 +486,44 @@ def generate_post(
         raise HTTPException(status_code=404, detail="Reddit 账号不存在")
 
     site_url = None
-    if payload.include_site_url and payload.post_type == "experience":
+    if payload.include_site_url and payload.post_type in {"pitfall", "guide"}:
         site_url = _site_url_from_domain(ctx.site.domain)
 
-    intent = "promo"
+    purpose = _purpose_for_subreddit(db, ctx.site.id, payload.subreddit)
+    intent = resolve_post_intent(
+        post_type=payload.post_type,
+        community_purpose=purpose,
+        include_site_url=bool(site_url),
+    )
+
     persona_prompt = _persona_prompt_for(db, ctx.site.id, account.id)
     product_brief = None
+    keyword = (payload.keyword or "").strip()
+    recent_titles = [
+        row[0]
+        for row in (
+            db.query(RedditPost.title)
+            .filter(
+                RedditPost.account_id == account.id,
+                RedditPost.post_type == payload.post_type,
+            )
+            .order_by(RedditPost.id.desc())
+            .limit(8)
+            .all()
+        )
+        if row[0]
+    ]
 
     try:
         ai = get_ai_client()
         generated = ai.generate_reddit_post(
             post_type=payload.post_type,
             subreddit=payload.subreddit,
-            keyword=payload.keyword,
+            keyword=keyword,
             site_url=site_url,
             persona_prompt=persona_prompt,
             product_brief=product_brief,
+            avoid_titles=recent_titles,
         )
     except DeepSeekError as exc:
         raise HTTPException(status_code=502, detail=f"AI 服务不可用：{exc}") from exc
@@ -461,7 +533,7 @@ def generate_post(
         account_id=account.id,
         post_type=payload.post_type,
         subreddit=normalize_subreddit(payload.subreddit),
-        keyword=payload.keyword,
+        keyword=keyword,
         title=generated["title"],
         body=generated["body"],
         site_url=site_url,
@@ -469,18 +541,18 @@ def generate_post(
         content_intent=intent,
     )
     db.add(post)
-    # 词库命中：累计使用次数，供选题复盘
-    kw_row = (
-        db.query(RedditKeyword)
-        .filter(
-            RedditKeyword.site_id == ctx.site.id,
-            RedditKeyword.keyword == payload.keyword.strip(),
+    if keyword:
+        kw_row = (
+            db.query(RedditKeyword)
+            .filter(
+                RedditKeyword.site_id == ctx.site.id,
+                RedditKeyword.keyword == keyword,
+            )
+            .first()
         )
-        .first()
-    )
-    if kw_row:
-        kw_row.used_count = (kw_row.used_count or 0) + 1
-        kw_row.last_used_at = datetime.utcnow()
+        if kw_row:
+            kw_row.used_count = (kw_row.used_count or 0) + 1
+            kw_row.last_used_at = datetime.utcnow()
     db.commit()
     db.refresh(post)
     return _fill_post_out(post)
@@ -939,6 +1011,92 @@ def cancel_comment_schedule(
     return _fill_comment_out(db, comment)
 
 
+# ============ Engage (养号互动：拉帖/评论 + 点赞) ============
+@router.get("/engage/feed", response_model=RedditEngageFeedOut)
+def engage_feed(
+    subreddit: str = Query(..., min_length=1),
+    account_id: int = Query(...),
+    limit: int = Query(default=15, ge=1, le=25),
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+) -> RedditEngageFeedOut:
+    account = reddit_oauth.get_site_account(db, ctx.site.id, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Reddit 账号不存在")
+    client = get_reddit_client_for_account(account)
+    try:
+        raw = client.list_feed(subreddit, limit=limit)
+    except RedditApiError as exc:
+        _raise_reddit_upstream(exc)
+    items = [
+        RedditDiscoverItem(
+            title=item.get("title") or "",
+            url=item.get("url") or "",
+            thing_id=item["thing_id"],
+            subreddit=item.get("subreddit") or normalize_subreddit(subreddit),
+            score=int(item.get("score") or 0),
+            num_comments=int(item.get("num_comments") or 0),
+            created_utc=int(item.get("created_utc") or 0),
+            body=item.get("body") or "",
+        )
+        for item in raw
+        if item.get("thing_id") and item.get("url")
+    ]
+    return RedditEngageFeedOut(items=items)
+
+
+@router.get("/engage/comments", response_model=RedditEngageCommentsOut)
+def engage_comments(
+    thing_id: str = Query(..., min_length=3),
+    subreddit: str = Query(default=""),
+    account_id: int = Query(...),
+    limit: int = Query(default=8, ge=1, le=15),
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+) -> RedditEngageCommentsOut:
+    account = reddit_oauth.get_site_account(db, ctx.site.id, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Reddit 账号不存在")
+    client = get_reddit_client_for_account(account)
+    try:
+        raw = client.list_post_comments(thing_id, subreddit=subreddit, limit=limit)
+    except RedditApiError as exc:
+        _raise_reddit_upstream(exc)
+    return RedditEngageCommentsOut(
+        items=[
+            RedditEngageCommentOut(
+                thing_id=c["thing_id"],
+                body=c.get("body") or "",
+                author=c.get("author") or "",
+                score=int(c.get("score") or 0),
+                created_utc=int(c.get("created_utc") or 0),
+                url=c.get("url") or "",
+            )
+            for c in raw
+            if c.get("thing_id")
+        ]
+    )
+
+
+@router.post("/engage/vote", response_model=RedditVoteOut)
+def engage_vote(
+    payload: RedditVoteIn,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+) -> RedditVoteOut:
+    if payload.direction not in (1, 0, -1):
+        raise HTTPException(status_code=400, detail="direction 必须是 1 / 0 / -1")
+    account = reddit_oauth.get_site_account(db, ctx.site.id, payload.account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Reddit 账号不存在")
+    client = get_reddit_client_for_account(account)
+    try:
+        client.vote(payload.thing_id.strip(), payload.direction)
+    except RedditApiError as exc:
+        _raise_reddit_upstream(exc)
+    return RedditVoteOut(ok=True, thing_id=payload.thing_id.strip(), direction=payload.direction)
+
+
 # ============ Discover ============
 @router.get("/discover/search", response_model=RedditDiscoverResponse)
 def discover_search(
@@ -1040,21 +1198,28 @@ def smart_discover(
     if remaining <= 0:
         raise HTTPException(status_code=409, detail="今日评论额度已用完")
 
-    # 若可能抽到产品槽，需提前选定品牌+产品
-    mix = count_mix_window(db, ctx.site.id)
-    from app.services.reddit_mix import can_enqueue_promo
-
-    promo_possible = can_enqueue_promo(casual_count=mix.casual, promo_count=mix.promo) and (
-        db.query(RedditCommunity)
-        .filter(
-            RedditCommunity.site_id == ctx.site.id,
-            RedditCommunity.is_active.is_(True),
-            RedditCommunity.purpose == "promo",
+    # 若可能抽到产品槽：需品牌+产品，且产品已绑定至少一个产品社区（配额仅在发布时校验）
+    bound_promo = 0
+    if payload.product_id:
+        product = (
+            db.query(RedditProduct)
+            .join(RedditBrand, RedditBrand.id == RedditProduct.brand_id)
+            .filter(
+                RedditProduct.id == payload.product_id,
+                RedditBrand.site_id == ctx.site.id,
+                RedditProduct.is_active.is_(True),
+            )
+            .first()
         )
-        .count()
-        > 0
-    )
-    if promo_possible:
+        if product:
+            bound_promo = len(
+                [
+                    c
+                    for c in (product.communities or [])
+                    if c.is_active and c.purpose == "promo" and c.site_id == ctx.site.id
+                ]
+            )
+    if bound_promo > 0:
         _require_brand_product(db, ctx.site.id, payload.brand_id, payload.product_id)
 
     client = get_reddit_client_for_account(account)
@@ -1087,6 +1252,7 @@ def smart_discover(
         search_posts=_search,
         remaining_slots=remaining,
         seed=account.id,
+        product_id=payload.product_id,
     )
     queued = int(result.get("queued") or 0)
     last_error = str(result.get("last_error") or "")
@@ -1198,19 +1364,6 @@ def list_communities(
     return q.order_by(RedditCommunity.priority.asc(), RedditCommunity.name.asc()).all()
 
 
-@router.post("/communities/seed", response_model=RedditSeedOut)
-def seed_communities(
-    account_id: int | None = None,
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(require_site_write),
-) -> RedditSeedOut:
-    """可选兴趣社区模板挂到当前账号；产品版块请手动新增并标为「产品」。"""
-    return RedditSeedOut(
-        communities_added=seed_default_communities(db, ctx.site.id, account_id),
-        keywords_added=seed_default_keywords(db, ctx.site.id),
-    )
-
-
 @router.post("/communities", response_model=RedditCommunityOut, status_code=status.HTTP_201_CREATED)
 def create_community(
     payload: RedditCommunityCreate,
@@ -1223,10 +1376,35 @@ def create_community(
         raise HTTPException(status_code=400, detail="人设社区必须指定所属账号")
     if _community_name_taken(db, ctx.site.id, name, payload.purpose, owner):
         raise HTTPException(status_code=409, detail=f"r/{name} 已在该账号的社区库中")
+    verified = None
+    if owner:
+        account = reddit_oauth.get_site_account(db, ctx.site.id, owner)
+        if account:
+            ai = None
+            try:
+                ai = get_ai_client()
+            except DeepSeekError:
+                ai = None
+            interests: list[str] = []
+            profile = get_or_create_profile(db, ctx.site.id, owner)
+            interests = parse_persona(profile.persona, config=profile.persona_config).interests
+            client = get_reddit_client_for_account(account)
+            judged = verify_subreddits_with_feed_llm(
+                [name],
+                interests=interests or [name],
+                client=client,
+                ai=ai,
+            )
+            verified = judged[0] if judged else None
+    if verified is None:
+        verified = verify_subreddit(name)
+    if verified.exists is False:
+        raise HTTPException(status_code=400, detail=f"r/{name} 不存在或无法访问（{verified.error}）")
     data = payload.model_dump(exclude_unset=True)
     data.pop("account_id", None)
     row = RedditCommunity(site_id=ctx.site.id, account_id=owner, **data)
     row.name = name
+    apply_verify_to_community(row, verified)
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -1283,6 +1461,9 @@ def suggest_communities(
 ) -> RedditCommunitySuggestOut:
     if not payload.account_id:
         raise HTTPException(status_code=400, detail="请先选择 Reddit 账号")
+    account = reddit_oauth.get_site_account(db, ctx.site.id, payload.account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Reddit 账号不存在")
     interests = [i.strip() for i in payload.interests if i and i.strip()]
     if not interests:
         profile = get_or_create_profile(db, ctx.site.id, payload.account_id)
@@ -1305,24 +1486,34 @@ def suggest_communities(
         )
         .all()
     }
+    to_check = [name for name in suggested if name.lower() not in existing]
+    kept: list[str] = [name for name in suggested if name.lower() in existing]
     added = 0
-    for name in suggested:
-        if name.lower() in existing:
-            continue
-        db.add(
-            RedditCommunity(
+    if to_check:
+        client = get_reddit_client_for_account(account)
+        judged = verify_subreddits_with_feed_llm(
+            to_check,
+            interests=interests,
+            client=client,
+            ai=ai,
+        )
+        for result in judged:
+            if result.exists is False or not result.is_active_enough:
+                continue
+            row = RedditCommunity(
                 site_id=ctx.site.id,
                 account_id=payload.account_id,
-                name=name,
+                name=result.name,
                 category="longtail",
                 purpose="persona",
-                is_active=True,
             )
-        )
-        existing.add(name.lower())
-        added += 1
+            apply_verify_to_community(row, result)
+            db.add(row)
+            existing.add(result.name.lower())
+            kept.append(result.name)
+            added += 1
     db.commit()
-    return RedditCommunitySuggestOut(suggested=suggested, added=added)
+    return RedditCommunitySuggestOut(suggested=kept, added=added)
 
 
 @router.get("/brands", response_model=list[RedditBrandOut])
@@ -1431,18 +1622,11 @@ def create_product(
         is_active=payload.is_active,
     )
     db.add(row)
+    db.flush()
+    _set_product_communities(db, site_id=ctx.site.id, product=row, community_ids=payload.community_ids or [])
     db.commit()
     db.refresh(row)
-    return RedditProductOut(
-        id=row.id,
-        brand_id=row.brand_id,
-        name=row.name,
-        category=row.category or "",
-        talking_points=row.talking_points or [],
-        is_active=row.is_active,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-    )
+    return _product_out(row)
 
 
 @router.patch("/products/{product_id}", response_model=RedditProductOut)
@@ -1461,6 +1645,7 @@ def update_product(
     if not row:
         raise HTTPException(status_code=404, detail="产品不存在")
     data = payload.model_dump(exclude_unset=True)
+    community_ids = data.pop("community_ids", None)
     if "name" in data and data["name"]:
         data["name"] = data["name"].strip()
     if "category" in data and data["category"] is not None:
@@ -1469,18 +1654,11 @@ def update_product(
         data["talking_points"] = [p.strip() for p in data["talking_points"] if p.strip()][:8]
     for k, v in data.items():
         setattr(row, k, v)
+    if community_ids is not None:
+        _set_product_communities(db, site_id=ctx.site.id, product=row, community_ids=community_ids)
     db.commit()
     db.refresh(row)
-    return RedditProductOut(
-        id=row.id,
-        brand_id=row.brand_id,
-        name=row.name,
-        category=row.category or "",
-        talking_points=row.talking_points or [],
-        is_active=row.is_active,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-    )
+    return _product_out(row)
 
 
 @router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)

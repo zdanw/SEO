@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -72,8 +73,114 @@ REDDIT_POST_SYSTEM_PROMPT = (
     "not a brand account and not a polished guide. First-person, short paragraphs, "
     "no bullet lists, no numbered steps, no TL;DR, no FAQ layout. "
     "Never use em dashes or en dashes; use commas, periods, or plain hyphens instead. "
-    "Do not sound like an ad. Do not invent specs, prices, or sources."
+    "Do not sound like an ad. Do not invent specs, prices, or sources. "
+    "Title and body must be about the exact same story. "
+    "The post must belong in the named subreddit; never dump a generic essay that ignores that community."
 )
+
+_COHERENCE_RULES = """
+CRITICAL coherence (must all be true):
+- Title and body are ONE story: the title must name or clearly refer to the same failure/topic the body narrates (same product category or same incident). No vague title + unrelated body.
+- Topic focus: {topic_line}
+- Belong in r/{subreddit}: match what that community actually posts. If it is meme/humor/shitpost oriented, keep it punchy and on-theme for that sub — do NOT write a dry techsupport / parenting / shopping essay that belongs elsewhere.
+{keyword_line}
+"""
+
+REDDIT_PITFALL_PROMPT = """Write a Reddit post for r/{subreddit} as a messy "I got burned / wasted money" story.
+
+Topic/keyword (the problem space, not an ad): {keyword}
+{site_line}
+{title_hint}
+{avoid_titles_line}
+""" + _COHERENCE_RULES + """
+Requirements:
+- English, first-person, frustrated + self-deprecating, like a real Reddit native of THIS sub
+- Title under 300 chars. Follow the assigned title style, but the concrete topic must still match the topic focus above (not a blank money rant).
+- Body: 120-220 words. Spend MOST of the post on bad prior options, wasted money, stress, dumb mistakes. Concrete details tied to the topic.
+- Your eventual solution (related to the topic) appears late and lightly — like an accidental find, not a recommendation essay.
+- Include one mild caveat about that solution (something still imperfect). NO hard sell, NO "highly recommend", NO affiliate energy.
+- NO numbered lists, NO bullets, NO TL;DR, NO section headers. Never use em dashes or en dashes.
+- End with a shrug or a question to the sub, not a CTA.
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_VENT_PROMPT = """Write a Reddit late-night vent / emotional support post for r/{subreddit}.
+
+Life pressure / emotional angle tied to: {keyword}
+{site_line}
+{title_hint}
+{avoid_titles_line}
+""" + _COHERENCE_RULES + """
+Requirements:
+- English, first-person, tired and human. Treehole / offmychest energy, fitting r/{subreddit} and the topic focus above.
+- Title under 300 chars. Follow the assigned title style. Do not always use "Burning out / how do you deal with...".
+- Body: 100-180 words about stress, guilt, exhaustion around the situation. Ask how others cope.
+- CRITICAL: Do NOT mention any brand, product, company, website, or shopping advice. Zero product talk.
+- NO lists, NO tips guide, NO "what worked for me" product story. Never use em dashes or en dashes.
+- End by asking the community for emotional / practical coping ideas only.
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_UNPOPULAR_PROMPT = """Write a Reddit "unpopular opinion / mildly spicy take" post for r/{subreddit}.
+
+Topic/keyword: {keyword}
+{site_line}
+{title_hint}
+{avoid_titles_line}
+""" + _COHERENCE_RULES + """
+Requirements:
+- English, first-person, a bit stubborn and conversational — invite debate, not a brand rant.
+- Title under 300 chars. Follow the assigned title style. Do not always start with "Unpopular opinion:".
+- Body: 100-200 words arguing a contrarian but non-extreme take about the topic focus that r/{subreddit} would actually argue about.
+- If you name a category or simple option related to the topic, keep it casual and non-promotional.
+- Stay away from politics, hate, or medical claims. NO lists, NO scorecards. Never use em dashes or en dashes.
+- End by asking people to disagree or share what they actually use.
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_GUIDE_PROMPT = """Write a Reddit altruistic resource / quick guide post for r/{subreddit}.
+
+Topic/keyword: {keyword}
+{site_line}
+{title_hint}
+{avoid_titles_line}
+""" + _COHERENCE_RULES + """
+Requirements:
+- English, first-person hobbyist who spent time compiling notes — helpful, not salesy.
+- Title under 300 chars. Follow the assigned title style. Do not always use "I spent X days compiling...".
+- Body: 140-240 words. Include a short list of 4-5 tools/tips as plain prose lines or a simple numbered list is OK here ONLY.
+- If a keyword was given, put a related option around item 3 or 4 — one dry factual phrase, zero hype adjectives.
+- Prefer names over URLs. Do NOT add tracking params. If a site URL is provided, you may mention the name once without pushing a click.
+- Never use em dashes or en dashes. No "must buy" / "game changer" language.
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_HELP_SEEK_PROMPT = """Write a Reddit ultra-specific help-request post for r/{subreddit}.
+
+Need / scenario keyword: {keyword}
+{site_line}
+{title_hint}
+{avoid_titles_line}
+""" + _COHERENCE_RULES + """
+Requirements:
+- English, first-person. Classic "looking for recommendations" Reddit native, NOT a stealth ad.
+- Title under 300 chars. Follow the assigned title style. Mix question forms; do not always start with "Anyone know...".
+- Body: 90-160 words with budget, constraints, and 2 failed options you already tried (why they failed). Ask for suggestions.
+- CRITICAL: Do NOT name or hint at your preferred brand/product as the answer. You are fishing for advice only.
+- NO affiliate tone, NO links. Never use em dashes or en dashes.
+- End by asking for lived experience from the sub.
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
 
 ARTICLE_PROMPT_TEMPLATE = """请围绕核心关键词「{keyword}」撰写一篇 1500-2000 字的高质量 SEO 长文。
 
@@ -132,59 +239,123 @@ SOCIAL_PROMPT_TEMPLATE = """基于以下文章，为 {platform} 平台生成 1 �
 {{"title": "<文案标题>", "summary": "<文案正文>", "hashtags": ["#标签1", "#标签2"]}}
 """
 
-REDDIT_CONSULTATION_PROMPT = """Write a Reddit post for r/{subreddit} answering a common question like you're chatting with someone, not publishing a guide.
+# 每种类型多组标题句式；生成时随机抽一组，降低撞模板概率
+REDDIT_TITLE_STYLES: dict[str, list[str]] = {
+    "pitfall": [
+        'Warning tone: "PSA: avoid ___ until you read this" / "learned the hard way about ___"',
+        'Money regret WITHOUT "I wasted $X": "___ sucked up way too much of my budget" / "refund denied, story inside"',
+        'Timeline rant: "three returns later on ___..." / "week 2 update: still mad about ___" (___ = the keyword topic)',
+        'Shame/self-own: "tell me I\'m dumb for buying ___" / "I fell for the marketing on ___"',
+        'Comparison fail: "switched from A to B and somehow made it worse"',
+        'Sleep/stress angle: "___ kept me up for nights for all the wrong reasons"',
+    ],
+    "vent": [
+        'Quiet exhaustion: "not dramatic, just tired of ___"',
+        'Ask for rituals: "what do you do at 1am when ___ hits?"',
+        'Guilt spiral: "I feel like a bad ___ because of ___"',
+        'Work bleed: "job is eating every hour, ___ is falling apart"',
+        'Solidarity seek: "anyone else quietly drowning in ___?"',
+        'No advice wanted first: "just need to say this about ___ out loud"',
+    ],
+    "unpopular": [
+        'Soft dissent: "maybe we overcomplicate ___?"',
+        'Hot take lite: "the fancy ___ features are mostly theater"',
+        'Budget defiance: "paying premium for ___ is optional, fight me"',
+        'Trend pushback: "everyone recommends ___, I stopped caring"',
+        'Tradeoff frame: "I\'d rather have boring reliable ___ than shiny"',
+        'Question bait: "why is basic ___ treated like a flex now?"',
+    ],
+    "guide": [
+        'Notebook dump: "notes from a weekend rabbit hole on ___"',
+        'Bookmark share: "links/tools I actually kept for ___"',
+        'Beginner map: "if I restarted ___ tomorrow, this is the short path"',
+        'Myth cleanup: "stuff I wish I ignored earlier about ___"',
+        'Field notes: "what worked vs what was noise for ___"',
+        'Checklist without hype: "practical ___ checklist (no sponsor vibes)"',
+    ],
+    "help_seek": [
+        'Constraint-first: "need ___ that works in [tiny scenario]"',
+        'Failed attempts: "tried A and B for ___, both flopped — ideas?"',
+        'Budget + limit: "under $Y, no wifi/no app, still need ___?"',
+        'Travel/odd place: "___ for [train/apartment/night shift] — recs?"',
+        'Decision paralysis: " narrowing ___ options, what would you pick?"',
+        'Experience ask: "has anyone lived with ___ in [specific setup]?"',
+    ],
+}
 
-Question/keyword: {keyword}
-{site_line}
 
-Requirements:
-- English, first-person, like a tired parent typing on their phone
-- Title: casual question or "what worked for us" vibe, under 300 characters (not "Here's what I learned" essay energy)
-- Body: 80-180 words, 1-3 short paragraphs only
-- Give 1-2 concrete tips woven into sentences. NO numbered lists, NO bullets, NO section headers, NO TL;DR
-- Never use em dashes or en dashes
-- NO links, NO hard product promotion; if a site URL is provided, one soft mention at most
-- Sound unfinished / conversational, not like a prepared answer
+def pick_title_style_hint(post_type: str, *, rng: random.Random | None = None) -> str:
+    styles = REDDIT_TITLE_STYLES.get(post_type) or REDDIT_TITLE_STYLES["vent"]
+    picker = rng or random.Random()
+    chosen = picker.choice(styles)
+    # 再塞 1 条「不要用」的对照，强化去模板
+    others = [s for s in styles if s != chosen]
+    avoid_example = picker.choice(others) if others else chosen
+    return (
+        f"Assigned title style for THIS draft (use this structure, paraphrase freely):\n- {chosen}\n"
+        f"Do NOT reuse this alternate style: {avoid_example}"
+    )
 
-Output JSON only:
-{{"title": "...", "body": "..."}}
-"""
 
-REDDIT_EXPERIENCE_PROMPT = """Write a Reddit post for r/{subreddit} sharing a personal experience like a quick vent or update.
+def format_avoid_titles_line(titles: list[str] | None) -> str:
+    cleaned = [t.strip() for t in (titles or []) if t and t.strip()]
+    if not cleaned:
+        return "Avoid repeating recent title openers from this account if possible."
+    listed = "; ".join(cleaned[:8])
+    return (
+        "Do NOT closely copy these recent titles from this account "
+        f"(change opener, rhythm, and keywords): {listed}"
+    )
 
-Topic/keyword: {keyword}
-{site_line}
 
-Requirements:
-- English, first-person, messy and brief
-- Title: under 300 characters, casual
-- Body: 80-160 words, short paragraphs. No pros/cons sections, no bullets, no numbered steps
-- Never use em dashes or en dashes
-- Mention at most one product naturally if it fits; no hard-sell
-- If site URL provided, one soft mention max at the end
-- End with a simple question or shrug, not a call-to-action
+def title_too_similar(candidate: str, recent: list[str], *, threshold: float = 0.55) -> bool:
+    """粗粒度去重：相同开头或整体相似度过高则视为撞车。"""
+    import difflib
 
-Output JSON only:
-{{"title": "...", "body": "..."}}
-"""
+    cand = " ".join((candidate or "").lower().split())
+    if not cand:
+        return True
+    cand_open = cand[:24]
+    for other in recent:
+        prev = " ".join((other or "").lower().split())
+        if not prev:
+            continue
+        if cand_open and prev.startswith(cand_open[:16]) and len(cand_open) >= 12:
+            return True
+        if difflib.SequenceMatcher(None, cand, prev).ratio() >= threshold:
+            return True
+    return False
 
-REDDIT_COMPARISON_PROMPT = """Write a Reddit post for r/{subreddit} casually comparing a few options, like telling a friend what you tried, not a buying guide.
 
-Topic/keyword: {keyword}
-{site_line}
+_TITLE_STOP = frozenset(
+    {
+        "that", "this", "with", "from", "have", "just", "like", "been", "were", "what",
+        "when", "your", "about", "into", "than", "them", "then", "some", "only", "also",
+        "over", "after", "still", "even", "much", "very", "gone", "and", "the", "for",
+        "are", "was", "but", "not", "you", "all", "can", "had", "her", "his", "how",
+        "our", "out", "has", "any", "my", "so", "is", "it", "to", "of", "in", "on",
+        "later", "three", "returns", "dignity", "money", "story", "update", "week",
+    }
+)
 
-Requirements:
-- English, first-person, fair but informal
-- Title: under 300 characters, not "2026 guide / Compared vs vs"
-- Body: 100-200 words in flowing paragraphs only
-- Mention 2-3 options in prose ("we tried X then Y..."). NO bullet lists, NO scorecards, NO TL;DR, NO "How to choose" sections
-- Never use em dashes or en dashes
-- Do not invent fake specs or prices
-- NO links unless site URL provided; then one soft mention max
 
-Output JSON only:
-{{"title": "...", "body": "..."}}
-"""
+def post_topic_coherent(title: str, body: str, keyword: str) -> bool:
+    """标题与正文同题；有关键词时再校验关键词相关。"""
+    title_l = (title or "").lower()
+    body_l = (body or "").lower()
+    blob = f"{title_l} {body_l}"
+    kw = (keyword or "").strip()
+    kw_tokens = [t for t in re.split(r"[\s/\-_+,]+", kw.lower()) if len(t) >= 3] if kw else []
+    if kw_tokens and not any(t in blob for t in kw_tokens):
+        return False
+    title_words = [
+        w for w in re.findall(r"[a-z0-9']+", title_l) if len(w) >= 4 and w not in _TITLE_STOP
+    ]
+    if len(title_words) >= 2:
+        hits = sum(1 for w in title_words if w in body_l)
+        if hits / len(title_words) < 0.25:
+            return False
+    return True
 
 REDDIT_COMMENT_PROMPT = """You are a real Reddit user casually replying in r/{subreddit}:
 
@@ -358,38 +529,97 @@ class DeepSeekClient:
         *,
         persona_prompt: str = "",
         product_brief: dict | None = None,
+        avoid_titles: list[str] | None = None,
+        rng: random.Random | None = None,
     ) -> dict[str, str]:
-        """Generate Reddit post: consultation / experience / comparison (English)."""
+        """Generate Reddit native post types (English)."""
         sr = subreddit.removeprefix("r/").strip()
-        extra = _reddit_post_extra_lines(persona_prompt, product_brief)
-        if post_type == "consultation":
+        kw = (keyword or "").strip() or f"everyday life topics common in r/{sr}"
+        topic_line = (
+            f'Stay on keyword "{kw}". Do not switch to a different rabbit hole.'
+            if (keyword or "").strip()
+            else f"No fixed keyword: invent a specific incident that fits r/{sr} and this post type."
+        )
+        keyword_line = (
+            "- Keyword tokens or clear synonyms must appear in title OR early body."
+            if (keyword or "").strip()
+            else "- Pick one concrete incident; keep title and body locked to that incident."
+        )
+        brief = None if post_type in {"vent", "help_seek"} else product_brief
+        extra = _reddit_post_extra_lines(persona_prompt, brief)
+        picker = rng or random.Random()
+
+        if post_type in {"vent", "help_seek"}:
+            site_line = "Do not include any links or product/brand names."
+        elif site_url and post_type in {"pitfall", "guide"}:
             site_line = (
-                f"You may softly reference this site as optional reading if relevant: {site_url}"
-                if site_url
-                else "Do not include any links."
+                f"Optional soft name-only mention related to this site (no tracking URL): {site_url}"
             )
-            prompt = REDDIT_CONSULTATION_PROMPT.format(subreddit=sr, keyword=keyword, site_line=site_line + extra)
-        elif post_type == "comparison":
-            site_line = (
-                f"You may mention this site once at the end as 'full data/write-up': {site_url}"
-                if site_url
-                else "Do not include any links."
-            )
-            prompt = REDDIT_COMPARISON_PROMPT.format(subreddit=sr, keyword=keyword, site_line=site_line + extra)
         else:
-            site_line = f"Site URL to soft-mention if natural: {site_url}" if site_url else "Do not include any links."
-            prompt = REDDIT_EXPERIENCE_PROMPT.format(
-                subreddit=sr, keyword=keyword, site_line=site_line + extra
+            site_line = "Do not include any links."
+
+        templates = {
+            "pitfall": REDDIT_PITFALL_PROMPT,
+            "vent": REDDIT_VENT_PROMPT,
+            "unpopular": REDDIT_UNPOPULAR_PROMPT,
+            "guide": REDDIT_GUIDE_PROMPT,
+            "help_seek": REDDIT_HELP_SEEK_PROMPT,
+        }
+        template = templates.get(post_type) or REDDIT_VENT_PROMPT
+        avoid = list(avoid_titles or [])
+        title_hint = pick_title_style_hint(post_type, rng=picker)
+        avoid_line = format_avoid_titles_line(avoid)
+
+        def _once() -> dict[str, str]:
+            prompt = template.format(
+                subreddit=sr,
+                keyword=kw,
+                site_line=site_line + extra,
+                title_hint=title_hint,
+                avoid_titles_line=avoid_line,
+                topic_line=topic_line,
+                keyword_line=keyword_line,
             )
-        raw = self.chat(prompt, system_prompt=REDDIT_POST_SYSTEM_PROMPT, temperature=0.9, max_tokens=700)
-        try:
+            temp = 0.92 + picker.random() * 0.08
+            raw = self.chat(
+                prompt,
+                system_prompt=REDDIT_POST_SYSTEM_PROMPT,
+                temperature=min(temp, 1.0),
+                max_tokens=800,
+            )
             obj = json.loads(_extract_json(raw))
             return {
-                "title": strip_em_dashes(str(obj.get("title", keyword)))[:300],
+                "title": strip_em_dashes(str(obj.get("title", kw)))[:300],
                 "body": strip_em_dashes(str(obj.get("body", ""))),
             }
-        except (json.JSONDecodeError, ValueError) as e:
-            raise DeepSeekError(f"Reddit post JSON parse failed: {e}; raw={raw[:300]}") from e
+
+        try:
+            result = _once()
+        except (json.JSONDecodeError, ValueError, DeepSeekError) as e:
+            raise DeepSeekError(f"Reddit post JSON parse failed: {e}") from e
+
+        need_retry = (avoid and title_too_similar(result["title"], avoid)) or (
+            not post_topic_coherent(result["title"], result["body"], (keyword or "").strip())
+        )
+        if need_retry:
+            title_hint = pick_title_style_hint(post_type, rng=picker)
+            avoid_line = format_avoid_titles_line(
+                avoid + [result["title"]] + [f"(keep topic on: {kw}; fit r/{sr})"]
+            )
+            try:
+                again = _once()
+                user_kw = (keyword or "").strip()
+                if post_topic_coherent(again["title"], again["body"], user_kw) and not (
+                    avoid and title_too_similar(again["title"], avoid)
+                ):
+                    return again
+                if post_topic_coherent(again["title"], again["body"], user_kw) and not post_topic_coherent(
+                    result["title"], result["body"], user_kw
+                ):
+                    return again
+            except Exception:
+                pass
+        return result
 
     def generate_reddit_comment(
         self,

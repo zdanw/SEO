@@ -82,6 +82,7 @@ def publish_comment_now(db: Session, comment: RedditComment, *, skip_risk_check:
             site_id=comment.site_id,
             account_id=comment.account_id,
             body=comment.body,
+            exclude_comment_id=comment.id,
         )
         if not report.ok:
             raise RiskViolation(report.errors, report.warnings)

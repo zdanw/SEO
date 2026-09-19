@@ -80,6 +80,18 @@ def resolve_intent(*, community_purpose: str | None, include_site_url: bool = Fa
     return "casual"
 
 
+def resolve_post_intent(
+    *,
+    post_type: str,
+    community_purpose: str | None,
+    include_site_url: bool = False,
+) -> str:
+    """发帖意图：树洞/场景求助强制 casual；其余按社区用途与是否带链。"""
+    if post_type in {"vent", "help_seek"}:
+        return "casual"
+    return resolve_intent(community_purpose=community_purpose, include_site_url=include_site_url)
+
+
 def casual_mentions_brand(text: str, brands: list[str]) -> bool:
     lowered = (text or "").lower()
     return any(brand.lower() in lowered for brand in brands if brand and brand.strip())
