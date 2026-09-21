@@ -10,9 +10,10 @@ from app.models.reddit import (  # noqa: F401
     RedditBrand,
     RedditComment,
     RedditCommunity,
-    RedditKeyword,
     RedditPost,
     RedditPostMetric,
     RedditProduct,
+    RedditProductKeyword,
 )
 from app.models.zernio_key import ZernioApiKey  # noqa: F401
+from app.models.task_run import TaskRun  # noqa: F401

@@ -5,7 +5,7 @@
         <div class="card-title-row">
           <div>
             <span class="card-title">品牌 / 产品库</span>
-            <p class="muted" style="margin: 4px 0 0">用于约 10% 产品向 Reddit 评论；每个产品可绑定多个产品社区（多对多），智能发现只进入已绑定社区。</p>
+            <p class="muted" style="margin: 4px 0 0">用于约 10% 产品向 Reddit 评论；每个产品可绑定关键词与产品社区。智能发现用关键词在绑定社区中搜索。</p>
           </div>
           <el-button type="primary" @click="openBrandEdit()">新增品牌</el-button>
         </div>
@@ -23,7 +23,7 @@
               closable
               @close="removeProduct(p)"
               @click="openProductEdit(row, p)"
-            >{{ p.name }}{{ p.category ? ` · ${p.category}` : '' }}{{ (p.community_names || []).length ? ` · ${p.community_names.length}社区` : '' }}</el-tag>
+              >{{ p.name }}{{ p.category ? ` · ${p.category}` : '' }}{{ (p.keywords || []).length ? ` · ${p.keywords.length}词` : '' }}{{ (p.community_names || []).length ? ` · ${p.community_names.length}社区` : '' }}</el-tag>
             <el-button size="small" link type="primary" @click="openProductEdit(row)">+ 产品</el-button>
           </template>
         </el-table-column>
@@ -66,6 +66,10 @@
         </el-form-item>
         <el-form-item label="可说卖点（逗号分隔）">
           <el-input v-model="productTalkingText" placeholder="no wifi, analog, low EMF" />
+        </el-form-item>
+        <el-form-item label="关键词（逗号分隔）">
+          <el-input v-model="productKeywordsText" placeholder="low EMF baby monitor, non-wifi baby monitor" />
+          <p class="muted" style="margin: 6px 0 0">智能发现在绑定社区中用这些词搜索；未填则不会做产品向搜索。</p>
         </el-form-item>
         <el-form-item label="绑定产品社区（可多选；同一社区可绑多个产品）">
           <el-select
@@ -116,6 +120,7 @@ const brandForm = reactive({ id: 0, name: '', is_active: true })
 const productDialog = ref(false)
 const productSaving = ref(false)
 const productTalkingText = ref('')
+const productKeywordsText = ref('')
 const productForm = reactive({
   id: 0, brand_id: 0, name: '', category: '', is_active: true, community_ids: [] as number[],
 })
@@ -198,6 +203,7 @@ function openProductEdit(brand: RedditBrand, row?: RedditBrandProduct) {
     productForm.is_active = row.is_active
     productForm.community_ids = [...(row.community_ids || [])]
     productTalkingText.value = (row.talking_points || []).join(', ')
+    productKeywordsText.value = (row.keywords || []).join(', ')
   } else {
     productForm.id = 0
     productForm.name = ''
@@ -205,6 +211,7 @@ function openProductEdit(brand: RedditBrand, row?: RedditBrandProduct) {
     productForm.is_active = true
     productForm.community_ids = []
     productTalkingText.value = ''
+    productKeywordsText.value = ''
   }
   productDialog.value = true
 }
@@ -220,6 +227,7 @@ async function saveProduct() {
       name: productForm.name.trim(),
       category: productForm.category.trim(),
       talking_points: splitComma(productTalkingText.value),
+      keywords: splitComma(productKeywordsText.value),
       is_active: productForm.is_active,
       community_ids: productForm.community_ids,
     }

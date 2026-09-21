@@ -247,32 +247,29 @@ class RedditProduct(Base):
         secondary=reddit_product_communities,
         back_populates="products",
     )
+    keyword_rows: Mapped[list["RedditProductKeyword"]] = relationship(
+        "RedditProductKeyword",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        order_by="RedditProductKeyword.id",
+    )
 
 
-class RedditKeyword(Base):
-    """Reddit 双词库：SEO 适配词 + AI 热搜词。
+class RedditProductKeyword(Base):
+    """产品绑定的社区搜索关键词。"""
 
-    对应方案 第三章-3「关键词&内容库筹备」。
-    """
-
-    __tablename__ = "reddit_keywords"
+    __tablename__ = "reddit_product_keywords"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    site_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("client_sites.id"), nullable=False, index=True
+    product_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("reddit_products.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    keyword: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
-    # seo = SEO 适配词库 / ai_hot = AI 热搜词库
-    category: Mapped[str] = mapped_column(String(20), default="seo", nullable=False, index=True)
-    intent_note: Mapped[str | None] = mapped_column(String(300), nullable=True)  # 搜索意图/选题备注
-    priority: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
-    used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    keyword: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=datetime.utcnow, nullable=False
     )
 
-    site = relationship("ClientSite")
+    product: Mapped["RedditProduct"] = relationship("RedditProduct", back_populates="keyword_rows")
 
 
 class RedditPostMetric(Base):

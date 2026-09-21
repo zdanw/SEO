@@ -13,7 +13,6 @@ AccountRole = Literal["warmup", "seeding", "expert"]
 AccountStage = Literal[
     "warmup_week1_2", "warmup_week3_4", "ready", "active", "warning", "suspended"
 ]
-KeywordCategory = Literal["seo", "ai_hot"]
 CommunityCategory = Literal["core", "longtail"]
 CommunityPurpose = Literal["persona", "promo"]
 ContentIntent = Literal["casual", "promo"]
@@ -108,32 +107,6 @@ class RedditCommunityOut(RedditCommunityBase):
     verify_error: Optional[str] = None
     created_at: datetime
     updated_at: datetime
-    model_config = ConfigDict(from_attributes=True)
-
-
-class RedditKeywordBase(BaseModel):
-    keyword: str = Field(min_length=1, max_length=200)
-    category: KeywordCategory = "seo"
-    intent_note: Optional[str] = Field(default=None, max_length=300)
-    priority: int = Field(default=3, ge=1, le=5)
-
-
-class RedditKeywordCreate(RedditKeywordBase):
-    pass
-
-
-class RedditKeywordUpdate(BaseModel):
-    keyword: Optional[str] = Field(default=None, min_length=1, max_length=200)
-    category: Optional[KeywordCategory] = None
-    intent_note: Optional[str] = Field(default=None, max_length=300)
-    priority: Optional[int] = Field(default=None, ge=1, le=5)
-
-
-class RedditKeywordOut(RedditKeywordBase):
-    id: int
-    used_count: int
-    last_used_at: Optional[datetime] = None
-    created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -313,7 +286,7 @@ class RedditDiscoverMeta(BaseModel):
 
 class RedditSmartDiscoverIn(BaseModel):
     account_id: int
-    limit: int = Field(default=3, ge=1, le=5)
+    subreddits: list[str] = Field(min_length=1, max_length=20)
     brand_id: Optional[int] = None
     product_id: Optional[int] = None
 
@@ -332,6 +305,7 @@ class RedditProductIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     category: str = Field(default="", max_length=120)
     talking_points: list[str] = Field(default_factory=list, max_length=8)
+    keywords: list[str] = Field(default_factory=list, max_length=20)
     is_active: bool = True
     community_ids: list[int] = Field(default_factory=list)
 
@@ -340,6 +314,7 @@ class RedditProductUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     category: Optional[str] = Field(default=None, max_length=120)
     talking_points: Optional[list[str]] = Field(default=None, max_length=8)
+    keywords: Optional[list[str]] = Field(default=None, max_length=20)
     is_active: Optional[bool] = None
     community_ids: Optional[list[int]] = None
 
@@ -350,6 +325,7 @@ class RedditProductOut(BaseModel):
     name: str
     category: str = ""
     talking_points: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
     is_active: bool = True
     community_ids: list[int] = Field(default_factory=list)
     community_names: list[str] = Field(default_factory=list)

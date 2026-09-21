@@ -165,12 +165,23 @@
                   <el-tag size="small" :type="statusTag(row.status)">{{ statusLabel(row.status) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="330" fixed="right">
+              <el-table-column label="失败原因" min-width="140" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.error_message" class="muted">{{ row.error_message }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="360" fixed="right">
                 <template #default="{ row }">
                   <el-button size="small" @click="openPostEdit(row)">编辑</el-button>
                   <el-button v-if="row.status === 'pending_review'" size="small" type="warning" @click="approvePost(row.id)">批准</el-button>
                   <el-button v-if="row.status === 'pending_review'" size="small" @click="rejectPost(row.id)">拒绝</el-button>
-                  <el-button v-if="row.status === 'approved'" size="small" type="success" :loading="publishingPostId === row.id" @click="publishPost(row.id)">发布</el-button>
+                  <el-button
+                    v-if="row.status === 'approved' || row.status === 'failed'"
+                    size="small"
+                    type="success"
+                    :loading="publishingPostId === row.id"
+                    @click="publishPost(row.id)"
+                  >{{ row.status === 'failed' ? '重试发布' : '发布' }}</el-button>
                   <el-button v-if="row.status === 'approved'" size="small" @click="openSchedule(row)">定时</el-button>
                   <el-button v-if="row.scheduled_at" size="small" @click="cancelSchedule(row)">取消定时</el-button>
                   <el-button v-if="row.status === 'posted'" size="small" @click="syncMetrics(row)">同步数据</el-button>
@@ -187,13 +198,43 @@
         <el-tabs v-model="commentInputTab" type="border-card">
           <el-tab-pane label="智能发现" name="smart">
             <p class="muted" style="margin-bottom: 12px">
-              按人设社区拉闲聊；约 10% 产品向评论只进入「当前产品已绑定」的产品社区。请先在品牌产品库为产品勾选社区。
+              选择产品后自动勾选已绑定社区；按产品关键词在社区中搜索相关帖并入队。也可再手动增减社区。
               <router-link to="/brands">管理品牌产品库</router-link>
             </p>
             <el-form label-position="top" style="max-width: 560px; margin-bottom: 12px">
+              <el-form-item label="评论社区" required>
+                <el-select
+                  v-model="smartDiscoverSubreddits"
+                  multiple
+                  filterable
+                  allow-create
+                  default-first-option
+                  collapse-tags
+                  collapse-tags-tooltip
+                  placeholder="选产品后自动填绑定社区；也可手选"
+                  style="width: 100%"
+                >
+                  <el-option-group v-if="personaCommunities.length" label="人设社区（闲聊）">
+                    <el-option
+                      v-for="c in personaCommunities"
+                      :key="`sd-p-${c.id}`"
+                      :label="`r/${c.name}`"
+                      :value="c.name"
+                    />
+                  </el-option-group>
+                  <el-option-group v-if="promoCommunities.length" label="产品社区（产品向）">
+                    <el-option
+                      v-for="c in promoCommunities"
+                      :key="`sd-m-${c.id}`"
+                      :label="`r/${c.name}`"
+                      :value="c.name"
+                    />
+                  </el-option-group>
+                </el-select>
+              </el-form-item>
               <el-row :gutter="12">
                 <el-col :span="12">
-                  <el-form-item label="品牌（产品向时必选）">
+                  <el-form-item label="品牌（产品社区时必选）">
                     <el-select v-model="selectedBrandId" clearable placeholder="选择品牌" style="width: 100%" @change="onBrandChange">
                       <el-option v-for="b in activeBrands" :key="b.id" :label="b.name" :value="b.id" />
                     </el-select>
@@ -201,14 +242,25 @@
                 </el-col>
                 <el-col :span="12">
                   <el-form-item label="产品">
-                    <el-select v-model="selectedProductId" clearable placeholder="选择产品" style="width: 100%">
+                    <el-select
+                      v-model="selectedProductId"
+                      clearable
+                      placeholder="选择产品"
+                      style="width: 100%"
+                      @change="onProductChange"
+                    >
                       <el-option v-for="p in productsOfSelectedBrand" :key="p.id" :label="productLabel(p)" :value="p.id" />
                     </el-select>
                   </el-form-item>
                 </el-col>
               </el-row>
             </el-form>
-            <el-button type="primary" :loading="smartDiscovering" :disabled="!selectedAccountId" @click="handleSmartDiscover">
+            <el-button
+              type="primary"
+              :loading="smartDiscovering"
+              :disabled="!selectedAccountId || !smartDiscoverSubreddits.length"
+              @click="handleSmartDiscover"
+            >
               智能发现并入队
             </el-button>
           </el-tab-pane>
@@ -308,12 +360,23 @@
               <el-tag size="small" :type="statusTag(row.status)">{{ statusLabel(row.status) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="360" fixed="right">
+          <el-table-column label="失败原因" min-width="140" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="row.error_message" class="muted">{{ row.error_message }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="380" fixed="right">
             <template #default="{ row }">
               <el-button size="small" @click="openCommentEdit(row)">编辑</el-button>
               <el-button v-if="row.status === 'pending_review'" size="small" type="warning" @click="approveComment(row.id)">批准</el-button>
               <el-button v-if="row.status === 'pending_review'" size="small" @click="rejectComment(row.id)">拒绝</el-button>
-              <el-button v-if="row.status === 'approved'" size="small" type="success" :loading="publishingCommentId === row.id" @click="publishComment(row.id)">发布</el-button>
+              <el-button
+                v-if="row.status === 'approved' || row.status === 'failed'"
+                size="small"
+                type="success"
+                :loading="publishingCommentId === row.id"
+                @click="publishComment(row.id)"
+              >{{ row.status === 'failed' ? '重试发布' : '发布' }}</el-button>
               <el-button v-if="row.status === 'approved'" size="small" @click="openCommentSchedule(row)">定时</el-button>
               <el-button v-if="row.scheduled_at" size="small" @click="cancelCommentSchedule(row)">取消定时</el-button>
               <el-button v-if="row.status !== 'posting'" size="small" type="danger" @click="deleteComment(row)">删除</el-button>
@@ -521,38 +584,6 @@
           </el-table-column>
         </el-table>
       </el-tab-pane>
-
-      <!-- 关键词库 -->
-      <el-tab-pane label="关键词库" name="keywords">
-        <div class="list-header">
-          <span>SEO 适配词 + AI 热搜词双词库（发帖命中自动累计使用次数）</span>
-          <el-button size="small" type="primary" @click="openKeywordEdit()">新增关键词</el-button>
-        </div>
-        <el-table :data="keywords" v-loading="keywordsLoading" size="small" stripe>
-          <el-table-column prop="keyword" label="关键词" min-width="180" />
-          <el-table-column label="类别" width="110">
-            <template #default="{ row }">
-              <el-tag size="small" :type="row.category === 'seo' ? 'primary' : 'warning'">{{ row.category === 'seo' ? 'SEO 词库' : 'AI 热搜' }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="intent_note" label="选题备注" min-width="160" show-overflow-tooltip />
-          <el-table-column prop="used_count" label="已用次数" width="90" />
-          <el-table-column label="最近使用" width="110">
-            <template #default="{ row }">
-              <span v-if="row.last_used_at">{{ formatTime(row.last_used_at) }}</span>
-              <span v-else class="muted">—</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="priority" label="优先级" width="80" />
-          <el-table-column label="操作" width="180" fixed="right">
-            <template #default="{ row }">
-              <el-button size="small" @click="useKeyword(row)">用于发帖</el-button>
-              <el-button size="small" @click="openKeywordEdit(row)">编辑</el-button>
-              <el-button size="small" type="danger" @click="removeKeyword(row)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
-      </el-tab-pane>
     </el-tabs>
 
     <!-- 编辑帖子弹窗 -->
@@ -720,31 +751,6 @@
         <el-button type="primary" :loading="communitySaving" @click="saveCommunity">保存</el-button>
       </template>
     </el-dialog>
-
-    <!-- 关键词编辑弹窗 -->
-    <el-dialog v-model="keywordDialog" :title="keywordForm.id ? '编辑关键词' : '新增关键词'" width="480px">
-      <el-form label-position="top">
-        <el-form-item label="关键词">
-          <el-input v-model="keywordForm.keyword" placeholder="low EMF baby monitor" />
-        </el-form-item>
-        <el-form-item label="类别">
-          <el-radio-group v-model="keywordForm.category">
-            <el-radio value="seo">SEO 适配词库</el-radio>
-            <el-radio value="ai_hot">AI 热搜词库</el-radio>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="选题备注">
-          <el-input v-model="keywordForm.intent_note" placeholder="搜索意图 / 内容方向" />
-        </el-form-item>
-        <el-form-item label="优先级（1 最高）">
-          <el-input-number v-model="keywordForm.priority" :min="1" :max="5" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="keywordDialog = false">取消</el-button>
-        <el-button type="primary" :loading="keywordSaving" @click="saveKeyword">保存</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -761,14 +767,13 @@ import {
   searchRedditPosts,
   getRedditOverview, listAccountProfiles, updateAccountProfile,
   listCommunities, createCommunity, updateCommunity, deleteCommunity,
-  listRedditKeywords, createRedditKeyword, updateRedditKeywordRow, deleteRedditKeywordRow,
   scheduleRedditPost, cancelRedditPostSchedule, syncPostMetrics,
   rejectRedditPost, rejectRedditComment, scheduleRedditComment, cancelRedditCommentSchedule,
   suggestPersonaCommunities, listBrands, smartDiscoverReddit,
   fetchEngageFeed, fetchEngageComments, upvoteRedditThing,
   type RedditStatus, type RedditPost, type RedditComment, type RedditDiscoverItem,
   type RedditAccount, type PostType,
-  type RedditOverview, type RedditCommunity, type RedditKeyword,
+  type RedditOverview, type RedditCommunity,
   type RedditBrand, type RedditBrandProduct,
   type RedditEngageComment,
 } from '@/api/reddit'
@@ -796,6 +801,7 @@ const productsOfSelectedBrand = computed(() => {
 })
 const suggesting = ref(false)
 const smartDiscovering = ref(false)
+const smartDiscoverSubreddits = ref<string[]>([])
 
 // ===== 养号互动 =====
 type EngagePostRow = RedditDiscoverItem & {
@@ -940,15 +946,6 @@ const communityForm = reactive<Partial<RedditCommunity>>({
   promo_weekday: undefined, daily_post_limit: 1, best_hour_utc: undefined, priority: 3, is_active: true,
 })
 
-// ===== 关键词库 =====
-const keywords = ref<RedditKeyword[]>([])
-const keywordsLoading = ref(false)
-const keywordDialog = ref(false)
-const keywordSaving = ref(false)
-const keywordForm = reactive<Partial<RedditKeyword>>({
-  id: 0, keyword: '', category: 'seo', intent_note: '', priority: 3,
-})
-
 // ===== 定时发布 =====
 const scheduleDialog = ref(false)
 const scheduleSaving = ref(false)
@@ -1034,13 +1031,12 @@ const commentSaving = ref(false)
 onMounted(async () => {
   if (route.query.reddit === 'error') ElMessage.error(`Reddit 连接失败：${route.query.message || ''}`)
   const tab = String(route.query.tab || '')
-  if (['posts', 'comments', 'accounts', 'communities', 'keywords'].includes(tab)) {
+  if (['posts', 'comments', 'accounts', 'communities'].includes(tab)) {
     innerTab.value = tab
   }
   await Promise.all([loadStatus(), loadOverview(), loadCommunities(), loadBrands()])
   await Promise.all([loadPosts(), loadComments()])
   if (innerTab.value === 'accounts') loadProfiles()
-  if (innerTab.value === 'keywords') loadKeywords()
 })
 
 watch(selectedAccountId, () => {
@@ -1136,7 +1132,9 @@ async function publishPost(id: number) {
   publishingPostId.value = id
   try {
     const r = await publishRedditPost(id)
-    ElMessage.success(r.status === 'posted' ? '发布成功' : `发布失败：${r.error_message}`)
+    if (r.status === 'posted') ElMessage.success('发布成功')
+    else if (r.status === 'posting') ElMessage.info('正在发布中，请稍后刷新')
+    else ElMessage.error(`发布失败：${r.error_message || r.status}`)
     loadPosts()
   } finally { publishingPostId.value = null }
 }
@@ -1169,21 +1167,34 @@ async function loadComments() {
 
 async function handleSmartDiscover() {
   if (!selectedAccountId.value) { ElMessage.warning('请选择 Reddit 账号'); return }
-  if (promoCommunities.value.length && (!selectedBrandId.value || !selectedProductId.value)) {
-    ElMessage.warning('有产品社区时请选择品牌和产品（约 10% 产品向评论）')
+  if (!smartDiscoverSubreddits.value.length) {
+    ElMessage.warning('请至少选择一个评论社区')
     return
+  }
+  const promoNames = new Set(promoCommunities.value.map((c) => c.name.toLowerCase()))
+  const selectedPromo = smartDiscoverSubreddits.value.some((n) => promoNames.has(n.toLowerCase()))
+  if (selectedPromo && (!selectedBrandId.value || !selectedProductId.value)) {
+    ElMessage.warning('选择了产品社区时请选择品牌和产品')
+    return
+  }
+  if (selectedPromo && selectedProductId.value) {
+    const product = productsOfSelectedBrand.value.find((p) => p.id === selectedProductId.value)
+    if (!product || !(product.keywords || []).length) {
+      ElMessage.warning('该产品尚未绑定关键词，请先在品牌/产品库中填写')
+      return
+    }
   }
   smartDiscovering.value = true
   try {
     const res = await smartDiscoverReddit({
       account_id: selectedAccountId.value,
-      limit: 3,
+      subreddits: smartDiscoverSubreddits.value,
       brand_id: selectedBrandId.value || undefined,
       product_id: selectedProductId.value || undefined,
     })
     const n = res.meta?.queued_count || 0
     if (n === 0) {
-      ElMessage.warning('没有找到可评论的新讨论。请确认人设社区已添加，稍后再试。')
+      ElMessage.warning('没有找到与产品相关的可评论讨论。请换社区或稍后再试。')
     } else {
       ElMessage.success(`已入队 ${n} 条待审评论`)
     }
@@ -1282,7 +1293,9 @@ async function publishComment(id: number) {
   publishingCommentId.value = id
   try {
     const r = await publishRedditComment(id)
-    ElMessage.success(r.status === 'posted' ? '评论发布成功' : `发布失败：${r.error_message}`)
+    if (r.status === 'posted') ElMessage.success('评论发布成功')
+    else if (r.status === 'posting') ElMessage.info('正在发布中，请稍后刷新')
+    else ElMessage.error(`发布失败：${r.error_message || r.status}`)
     loadComments()
   } finally { publishingCommentId.value = null }
 }
@@ -1420,6 +1433,7 @@ async function loadBrands() {
     const prod = (first.products || []).find((p) => p.is_active !== false)
     selectedProductId.value = prod?.id ?? null
   }
+  applyProductBoundCommunities()
 }
 
 function selectedBrandName() {
@@ -1430,10 +1444,30 @@ function productLabel(p: RedditBrandProduct) {
   return p.category ? `${p.name} (${p.category})` : p.name
 }
 
+function applyProductBoundCommunities() {
+  const p = productsOfSelectedBrand.value.find((x) => x.id === selectedProductId.value)
+  if (!p) return
+  const names = (p.community_names || []).filter(Boolean)
+  if (names.length) {
+    smartDiscoverSubreddits.value = [...names]
+    return
+  }
+  const ids = new Set(p.community_ids || [])
+  if (!ids.size) return
+  smartDiscoverSubreddits.value = communities.value
+    .filter((c) => ids.has(c.id) && c.is_active)
+    .map((c) => c.name)
+}
+
 function onBrandChange() {
   selectedProductId.value = null
   const first = productsOfSelectedBrand.value[0]
   if (first) selectedProductId.value = first.id
+  applyProductBoundCommunities()
+}
+
+function onProductChange() {
+  applyProductBoundCommunities()
 }
 
 async function handleSuggestCommunities() {
@@ -1494,51 +1528,6 @@ async function removeCommunity(row: RedditCommunity) {
   await deleteCommunity(row.id)
   ElMessage.success('已删除')
   loadCommunities()
-}
-
-// ===== 关键词库 =====
-async function loadKeywords() {
-  keywordsLoading.value = true
-  try { keywords.value = await listRedditKeywords() } finally { keywordsLoading.value = false }
-}
-
-function openKeywordEdit(row?: RedditKeyword) {
-  if (row) {
-    Object.assign(keywordForm, { id: row.id, keyword: row.keyword, category: row.category, intent_note: row.intent_note || '', priority: row.priority })
-  } else {
-    Object.assign(keywordForm, { id: 0, keyword: '', category: 'seo', intent_note: '', priority: 3 })
-  }
-  keywordDialog.value = true
-}
-
-async function saveKeyword() {
-  if (!keywordForm.keyword?.trim()) { ElMessage.warning('请填写关键词'); return }
-  keywordSaving.value = true
-  try {
-    if (keywordForm.id) {
-      await updateRedditKeywordRow(keywordForm.id, { ...keywordForm, keyword: keywordForm.keyword.trim() })
-    } else {
-      await createRedditKeyword({ ...keywordForm, keyword: keywordForm.keyword.trim() })
-    }
-    ElMessage.success('已保存')
-    keywordDialog.value = false
-    loadKeywords()
-  } finally { keywordSaving.value = false }
-}
-
-async function removeKeyword(row: RedditKeyword) {
-  try {
-    await ElMessageBox.confirm(`删除关键词「${row.keyword}」？`, '删除确认', { type: 'warning' })
-  } catch { return }
-  await deleteRedditKeywordRow(row.id)
-  ElMessage.success('已删除')
-  loadKeywords()
-}
-
-function useKeyword(row: RedditKeyword) {
-  postForm.keyword = row.keyword
-  innerTab.value = 'posts'
-  ElMessage.success(`已填入关键词「${row.keyword}」，请选择子版块后生成`)
 }
 
 // ===== 定时发布 / 数据同步 =====
@@ -1605,7 +1594,6 @@ async function syncMetrics(row: RedditPost) {
 function onTabChange(name: string | number) {
   if (name === 'accounts' && !profiles.value.length) loadProfiles()
   if (name === 'communities' && !communities.value.length) loadCommunities()
-  if (name === 'keywords' && !keywords.value.length) loadKeywords()
   if (name === 'engage') {
     if (!communities.value.length) loadCommunities()
     if (!engageSubreddit.value) {

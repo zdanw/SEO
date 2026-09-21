@@ -15,10 +15,10 @@ from app.models.reddit import (
     RedditBrand,
     RedditComment,
     RedditCommunity,
-    RedditKeyword,
     RedditPost,
     RedditPostMetric,
     RedditProduct,
+    RedditProductKeyword,
 )
 from app.models.user import User
 from app.models.zernio_key import ZernioApiKey
@@ -42,9 +42,6 @@ from app.schemas.reddit import (
     RedditEngageCommentOut,
     RedditEngageCommentsOut,
     RedditEngageFeedOut,
-    RedditKeywordCreate,
-    RedditKeywordOut,
-    RedditKeywordUpdate,
     RedditMetricOut,
     RedditOAuthStartOut,
     RedditOverviewOut,
@@ -100,7 +97,7 @@ from app.services.zernio_keys import is_zernio_ready, list_all_keys, list_enable
 
 router = APIRouter()
 
-_EDITABLE_STATUSES = {"draft", "pending_review", "approved"}
+_EDITABLE_STATUSES = {"draft", "pending_review", "approved", "failed"}
 
 
 def _risk_http(exc: RiskViolation) -> HTTPException:
@@ -198,18 +195,29 @@ def _fill_comment_out(db: Session, comment: RedditComment) -> RedditComment:
 
 def _product_out(product: RedditProduct) -> RedditProductOut:
     communities = sorted(product.communities or [], key=lambda c: c.id)
+    keywords = [r.keyword for r in (product.keyword_rows or [])]
     return RedditProductOut(
         id=product.id,
         brand_id=product.brand_id,
         name=product.name,
         category=product.category or "",
         talking_points=product.talking_points or [],
+        keywords=keywords,
         is_active=product.is_active,
         community_ids=[c.id for c in communities],
         community_names=[c.name for c in communities],
         created_at=product.created_at,
         updated_at=product.updated_at,
     )
+
+
+def _set_product_keywords(product: RedditProduct, keywords: list[str] | None) -> None:
+    from app.services.reddit_discover import normalize_product_keywords
+
+    cleaned = normalize_product_keywords(keywords)
+    product.keyword_rows = [
+        RedditProductKeyword(keyword=kw) for kw in cleaned
+    ]
 
 
 def _set_product_communities(
@@ -541,18 +549,6 @@ def generate_post(
         content_intent=intent,
     )
     db.add(post)
-    if keyword:
-        kw_row = (
-            db.query(RedditKeyword)
-            .filter(
-                RedditKeyword.site_id == ctx.site.id,
-                RedditKeyword.keyword == keyword,
-            )
-            .first()
-        )
-        if kw_row:
-            kw_row.used_count = (kw_row.used_count or 0) + 1
-            kw_row.last_used_at = datetime.utcnow()
     db.commit()
     db.refresh(post)
     return _fill_post_out(post)
@@ -1194,39 +1190,34 @@ def smart_discover(
     account = reddit_oauth.get_site_account(db, ctx.site.id, payload.account_id)
     if not account:
         raise HTTPException(status_code=404, detail="Reddit 账号不存在")
-    remaining = min(payload.limit, _remaining_comment_slots(db, ctx.site.id, account.id))
+
+    # 规范化并去重；选了产品社区则必须带品牌+产品（写产品向文案）
+    selected: list[str] = []
+    seen_sr: set[str] = set()
+    has_promo = False
+    for raw in payload.subreddits:
+        sr = normalize_subreddit(raw)
+        key = sr.lower()
+        if not sr or key in seen_sr:
+            continue
+        seen_sr.add(key)
+        selected.append(sr)
+        if _purpose_for_subreddit(db, ctx.site.id, sr) == "promo":
+            has_promo = True
+    if not selected:
+        raise HTTPException(status_code=400, detail="请至少选择一个评论社区")
+    if has_promo:
+        _require_brand_product(db, ctx.site.id, payload.brand_id, payload.product_id)
+
+    remaining = min(len(selected), _remaining_comment_slots(db, ctx.site.id, account.id))
     if remaining <= 0:
         raise HTTPException(status_code=409, detail="今日评论额度已用完")
-
-    # 若可能抽到产品槽：需品牌+产品，且产品已绑定至少一个产品社区（配额仅在发布时校验）
-    bound_promo = 0
-    if payload.product_id:
-        product = (
-            db.query(RedditProduct)
-            .join(RedditBrand, RedditBrand.id == RedditProduct.brand_id)
-            .filter(
-                RedditProduct.id == payload.product_id,
-                RedditBrand.site_id == ctx.site.id,
-                RedditProduct.is_active.is_(True),
-            )
-            .first()
-        )
-        if product:
-            bound_promo = len(
-                [
-                    c
-                    for c in (product.communities or [])
-                    if c.is_active and c.purpose == "promo" and c.site_id == ctx.site.id
-                ]
-            )
-    if bound_promo > 0:
-        _require_brand_product(db, ctx.site.id, payload.brand_id, payload.product_id)
 
     client = get_reddit_client_for_account(account)
 
     def _search(subreddit: str, keyword: str, limit: int):
-        # Zernio 当前对 /reddit/search 返回 404；智能发现要的是社区新帖，直接走 feed。
-        return client.list_feed(subreddit, limit=limit)
+        # 带关键词走 search（无 search 时 Zernio 客户端会回退 feed + 关键词过滤）
+        return client.search_posts(subreddit, keyword, limit=limit)
 
     def _generate(item: dict, intent: str) -> None:
         _generate_comment_for_url(
@@ -1253,13 +1244,14 @@ def smart_discover(
         remaining_slots=remaining,
         seed=account.id,
         product_id=payload.product_id,
+        subreddits=selected,
     )
     queued = int(result.get("queued") or 0)
     last_error = str(result.get("last_error") or "")
     reason = str(result.get("reason") or "")
     if queued == 0:
         if reason == "no_communities":
-            raise HTTPException(status_code=400, detail="没有可用的人设/产品社区，请先在社区库添加并启用")
+            raise HTTPException(status_code=400, detail="请至少选择一个有效社区")
         if reason == "upstream" or int(result.get("errors") or 0) > 0:
             raise HTTPException(
                 status_code=502,
@@ -1269,7 +1261,7 @@ def smart_discover(
             raise HTTPException(status_code=502, detail=last_error or "评论生成失败")
         raise HTTPException(
             status_code=409,
-            detail="没有找到 48 小时内可评论的新讨论。请确认人设社区已添加，或稍后再试。",
+            detail="没有找到与所选产品相关、且 48 小时内可评论的讨论。请换社区、检查产品绑定，或稍后再试。",
         )
     return RedditDiscoverResponse(
         items=[],
@@ -1624,6 +1616,7 @@ def create_product(
     db.add(row)
     db.flush()
     _set_product_communities(db, site_id=ctx.site.id, product=row, community_ids=payload.community_ids or [])
+    _set_product_keywords(row, payload.keywords)
     db.commit()
     db.refresh(row)
     return _product_out(row)
@@ -1646,6 +1639,7 @@ def update_product(
         raise HTTPException(status_code=404, detail="产品不存在")
     data = payload.model_dump(exclude_unset=True)
     community_ids = data.pop("community_ids", None)
+    keywords = data.pop("keywords", None)
     if "name" in data and data["name"]:
         data["name"] = data["name"].strip()
     if "category" in data and data["category"] is not None:
@@ -1656,6 +1650,8 @@ def update_product(
         setattr(row, k, v)
     if community_ids is not None:
         _set_product_communities(db, site_id=ctx.site.id, product=row, community_ids=community_ids)
+    if keywords is not None:
+        _set_product_keywords(row, keywords)
     db.commit()
     db.refresh(row)
     return _product_out(row)
@@ -1680,84 +1676,6 @@ def delete_product(
     )
     db.delete(row)
     db.commit()
-
-
-
-# ============ 关键词双词库 ============
-@router.get("/keywords", response_model=list[RedditKeywordOut])
-def list_reddit_keywords(
-    category: str | None = Query(default=None),
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(get_site_context),
-) -> list[RedditKeyword]:
-    q = db.query(RedditKeyword).filter(RedditKeyword.site_id == ctx.site.id)
-    if category:
-        q = q.filter(RedditKeyword.category == category)
-    return q.order_by(RedditKeyword.priority.asc(), RedditKeyword.id.asc()).all()
-
-
-@router.post("/keywords", response_model=RedditKeywordOut, status_code=status.HTTP_201_CREATED)
-def create_reddit_keyword(
-    payload: RedditKeywordCreate,
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(require_site_write),
-) -> RedditKeyword:
-    exists = (
-        db.query(RedditKeyword)
-        .filter(
-            RedditKeyword.site_id == ctx.site.id,
-            RedditKeyword.keyword == payload.keyword.strip(),
-            RedditKeyword.category == payload.category,
-        )
-        .first()
-    )
-    if exists:
-        raise HTTPException(status_code=409, detail="该关键词已存在")
-    row = RedditKeyword(site_id=ctx.site.id, **payload.model_dump(exclude_unset=True))
-    row.keyword = payload.keyword.strip()
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-@router.patch("/keywords/{keyword_id}", response_model=RedditKeywordOut)
-def update_reddit_keyword(
-    keyword_id: int,
-    payload: RedditKeywordUpdate,
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(require_site_write),
-) -> RedditKeyword:
-    row = (
-        db.query(RedditKeyword)
-        .filter(RedditKeyword.id == keyword_id, RedditKeyword.site_id == ctx.site.id)
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="关键词不存在")
-    for k, v in payload.model_dump(exclude_unset=True).items():
-        setattr(row, k, v.strip() if isinstance(v, str) else v)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-@router.delete("/keywords/{keyword_id}", status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
-def delete_reddit_keyword(
-    keyword_id: int,
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(require_site_write),
-):
-    row = (
-        db.query(RedditKeyword)
-        .filter(RedditKeyword.id == keyword_id, RedditKeyword.site_id == ctx.site.id)
-        .first()
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="关键词不存在")
-    db.delete(row)
-    db.commit()
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ============ 帖子数据指标 ============

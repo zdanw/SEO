@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 from app.services.reddit_discover import (
     filter_commentable,
     pick_discover_targets,
+    pick_promo_search_keyword,
+    prefer_product_relevant,
     prefer_questions,
+    product_search_terms,
     run_smart_discover,
     suggest_persona_subreddits,
 )
@@ -160,3 +163,132 @@ def test_run_smart_discover_uses_feed_items():
     )
     assert result["queued"] >= 1
     assert generated
+
+
+def test_run_smart_discover_manual_targets_one_per_community():
+    now = int(datetime.now(timezone.utc).timestamp())
+    searched: list[str] = []
+    generated: list[tuple[str, str]] = []
+
+    def feed(subreddit, keyword, limit):
+        searched.append(subreddit)
+        title = (
+            "help with baby gear picks?"
+            if subreddit == "BabyGear"
+            else "help with night wakes?"
+        )
+        return [{
+            "title": title,
+            "url": f"https://www.reddit.com/r/{subreddit}/comments/{subreddit.lower()}/hi/",
+            "thing_id": f"t3_{subreddit}",
+            "subreddit": subreddit,
+            "score": 4,
+            "created_utc": now - 600,
+            "body": "",
+        }]
+
+    result = run_smart_discover(
+        persona_communities=[],
+        promo_communities=[],
+        already_commented=set(),
+        search_fn=feed,
+        generate_fn=lambda item, intent: generated.append((item["subreddit"], intent)),
+        allow_promo=True,
+        remaining_slots=5,
+        targets=[("Parenting", "casual"), ("BabyGear", "promo")],
+        product_terms=["baby gear"],
+        now=datetime.now(timezone.utc),
+    )
+    assert result["queued"] == 2
+    assert searched == ["Parenting", "BabyGear"]
+    assert generated == [("Parenting", "casual"), ("BabyGear", "promo")]
+
+
+def test_product_search_terms_from_keywords_only():
+    terms = product_search_terms(keywords=[" Baby Monitors ", "EMF", "Baby Monitors", ""])
+    assert terms == ["Baby Monitors", "EMF"]
+
+
+def test_pick_promo_search_keyword_uses_seed():
+    terms = ["a", "b", "c"]
+    assert pick_promo_search_keyword(terms, seed=7) == pick_promo_search_keyword(terms, seed=7)
+    assert pick_promo_search_keyword([], seed=1) == ""
+
+
+def test_prefer_product_relevant_drops_unrelated():
+    items = [
+        {"title": "anyone else tired today?", "body": "", "url": "a"},
+        {"title": "best baby monitors for newborns?", "body": "", "url": "b"},
+        {"title": "wifi baby monitors EMF worries", "body": "", "url": "c"},
+    ]
+    kept = prefer_product_relevant(items, ["Baby Monitors", "EMF"])
+    assert {i["url"] for i in kept} == {"b", "c"}
+    assert kept[0]["url"] == "b"  # 问句优先
+    assert all(i["url"] != "a" for i in kept)
+
+
+def test_run_smart_discover_promo_skips_when_no_product_terms():
+    calls: list[tuple[str, str]] = []
+
+    def feed(subreddit, keyword, limit):
+        calls.append((subreddit, keyword))
+        return []
+
+    result = run_smart_discover(
+        persona_communities=[],
+        promo_communities=[],
+        already_commented=set(),
+        search_fn=feed,
+        generate_fn=lambda *_: None,
+        allow_promo=True,
+        remaining_slots=3,
+        targets=[("Buyingforbaby", "promo")],
+        product_terms=[],
+        now=datetime.now(timezone.utc),
+    )
+    assert calls == []
+    assert result["queued"] == 0
+
+
+def test_run_smart_discover_promo_skips_unrelated_posts():
+    now = int(datetime.now(timezone.utc).timestamp())
+    generated: list[str] = []
+
+    def feed(subreddit, keyword, limit):
+        assert keyword == "Baby Monitors"
+        return [
+            {
+                "title": "random parenting rant",
+                "url": "https://www.reddit.com/r/x/comments/aaa/hi/",
+                "thing_id": "t3_aaa",
+                "subreddit": subreddit,
+                "score": 4,
+                "created_utc": now - 600,
+                "body": "",
+            },
+            {
+                "title": "which baby monitors are quiet at night?",
+                "url": "https://www.reddit.com/r/x/comments/bbb/hi/",
+                "thing_id": "t3_bbb",
+                "subreddit": subreddit,
+                "score": 4,
+                "created_utc": now - 500,
+                "body": "",
+            },
+        ]
+
+    result = run_smart_discover(
+        persona_communities=[],
+        promo_communities=[],
+        already_commented=set(),
+        search_fn=feed,
+        generate_fn=lambda item, intent: generated.append(item["url"]),
+        allow_promo=True,
+        remaining_slots=3,
+        seed=1,
+        targets=[("Buyingforbaby", "promo")],
+        product_terms=["Baby Monitors"],
+        now=datetime.now(timezone.utc),
+    )
+    assert result["queued"] == 1
+    assert generated == ["https://www.reddit.com/r/x/comments/bbb/hi/"]

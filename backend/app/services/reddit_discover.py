@@ -105,6 +105,55 @@ def prefer_questions(items: list[dict]) -> list[dict]:
     return questions + rest
 
 
+def normalize_product_keywords(raw: list[str] | None, *, limit: int = 20) -> list[str]:
+    """trim / 去空 / 大小写去重，保留首次出现的原文大小写。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        term = " ".join(str(item or "").split()).strip()
+        if not term:
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(term)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def product_search_terms(*, keywords: list[str] | None = None) -> list[str]:
+    """仅产品绑定关键词，不用名称/品类/卖点。"""
+    return normalize_product_keywords(keywords)
+
+
+def pick_promo_search_keyword(terms: list[str], *, seed: int | None = None) -> str:
+    clean = [t for t in terms if t]
+    if not clean:
+        return ""
+    rng = random.Random(seed) if seed is not None else random
+    return rng.choice(clean)
+
+
+def relevance_score(item: dict, terms: list[str]) -> int:
+    if not terms:
+        return 0
+    text = f"{item.get('title') or ''} {item.get('body') or ''}".lower()
+    return sum(1 for t in terms if t and t.lower() in text)
+
+
+def prefer_product_relevant(items: list[dict], terms: list[str]) -> list[dict]:
+    """只保留标题/正文命中产品词的帖；无命中则返回空（不强行用不相关帖）。"""
+    if not terms or not items:
+        return list(items)
+    scored = [(relevance_score(i, terms), i) for i in items]
+    scored.sort(key=lambda x: (-x[0], 0))
+    matched = [i for score, i in scored if score > 0]
+    # 命中后再把问句排前面
+    return prefer_questions(matched) if matched else []
+
+
 def suggest_persona_subreddits(interests: list[str], *, ai=None, limit: int = 12) -> list[str]:
     names: list[str] = []
     if ai is not None:
@@ -155,14 +204,20 @@ def run_smart_discover(
     now: datetime | None = None,
     posts_per_community: int = 1,
     feed_limit: int = FEED_PULL_LIMIT,
+    targets: list[tuple[str, str]] | None = None,
+    product_terms: list[str] | None = None,
 ) -> dict:
     """无 DB 的发现循环，供单测与任务复用。"""
-    targets = pick_discover_targets(
-        persona_communities,
-        promo_communities,
-        seed=seed,
-        allow_promo=allow_promo,
-    )
+    if targets is None:
+        targets = pick_discover_targets(
+            persona_communities,
+            promo_communities,
+            seed=seed,
+            allow_promo=allow_promo,
+        )
+    terms = [t for t in (product_terms or []) if t]
+    promo_keyword = pick_promo_search_keyword(terms, seed=seed)
+    pull_limit = max(feed_limit, 15) if terms else feed_limit
     queued = 0
     skipped = 0
     errors = 0
@@ -173,9 +228,16 @@ def run_smart_discover(
     for subreddit, intent in targets:
         if queued >= remaining_slots:
             break
-        keyword = "discussion" if intent == "casual" else subreddit
+        if intent == "promo":
+            if not promo_keyword:
+                continue
+            keyword = promo_keyword
+        elif intent == "casual":
+            keyword = "discussion"
+        else:
+            keyword = subreddit
         try:
-            raw = search_fn(subreddit, keyword, feed_limit)
+            raw = search_fn(subreddit, keyword, pull_limit)
         except Exception as exc:
             errors += 1
             last_error = str(exc)
@@ -186,6 +248,8 @@ def run_smart_discover(
         candidates = prefer_questions(
             filter_commentable(raw, already_commented=used_urls, now=now)
         )
+        if intent == "promo" and terms:
+            candidates = prefer_product_relevant(candidates, terms)
         for item in candidates[:posts_per_community]:
             if queued >= remaining_slots:
                 break
@@ -236,8 +300,66 @@ def smart_discover_for_account(
     remaining_slots: int,
     seed: int | None = None,
     product_id: int | None = None,
+    subreddits: list[str] | None = None,
 ) -> dict:
     from app.models.reddit import RedditComment, RedditCommunity, RedditProduct
+
+    commented = {
+        row[0]
+        for row in db.query(RedditComment.target_post_url)
+        .filter(RedditComment.site_id == site_id, RedditComment.account_id == account_id)
+        .all()
+        if row[0]
+    }
+
+    product = None
+    product_terms: list[str] = []
+    if product_id:
+        product = (
+            db.query(RedditProduct)
+            .filter(RedditProduct.id == product_id, RedditProduct.is_active.is_(True))
+            .first()
+        )
+        if product:
+            rows = getattr(product, "keyword_rows", None) or []
+            product_terms = product_search_terms(
+                keywords=[getattr(r, "keyword", "") for r in rows],
+            )
+
+    def _gen(item: dict, intent: str) -> None:
+        generate_comment(item, intent)
+
+    # 手选社区：每个社区 1 条，意图由社区库 purpose 决定（未知则 casual）
+    if subreddits:
+        manual_targets: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw in subreddits:
+            sr = normalize_subreddit(raw)
+            key = sr.lower()
+            if not sr or key in seen:
+                continue
+            seen.add(key)
+            row = (
+                db.query(RedditCommunity)
+                .filter(RedditCommunity.site_id == site_id, RedditCommunity.name == sr)
+                .first()
+            )
+            intent = "promo" if row and row.purpose == "promo" else "casual"
+            manual_targets.append((sr, intent))
+        if not manual_targets:
+            return {"queued": 0, "skipped": 0, "errors": 0, "last_error": "", "reason": "no_communities"}
+        return run_smart_discover(
+            persona_communities=[],
+            promo_communities=[],
+            already_commented=commented,
+            search_fn=search_posts,
+            generate_fn=_gen,
+            allow_promo=True,
+            remaining_slots=remaining_slots,
+            seed=seed,
+            targets=manual_targets,
+            product_terms=product_terms,
+        )
 
     persona_rows = _refresh_stale_communities(
         db,
@@ -262,29 +384,14 @@ def smart_discover_for_account(
     )
     promo_names = [r.name for r in promo_rows]
     if product_id:
-        product = (
-            db.query(RedditProduct)
-            .filter(RedditProduct.id == product_id, RedditProduct.is_active.is_(True))
-            .first()
-        )
         bound = {c.name for c in (product.communities or [])} if product else set()
         promo_names = promo_names_for_product(promo_names, bound)
     else:
         # 未指定产品：不抽产品社区，避免社区与卖点错配
         promo_names = []
 
-    commented = {
-        row[0]
-        for row in db.query(RedditComment.target_post_url)
-        .filter(RedditComment.site_id == site_id, RedditComment.account_id == account_id)
-        .all()
-        if row[0]
-    }
     # 生成阶段不拦配额；发布时由 publish 路径 enforce_promo_quota
     allow_promo = bool(promo_names)
-
-    def _gen(item: dict, intent: str) -> None:
-        generate_comment(item, intent)
 
     return run_smart_discover(
         persona_communities=[r.name for r in persona_rows],
@@ -295,4 +402,5 @@ def smart_discover_for_account(
         allow_promo=allow_promo,
         remaining_slots=remaining_slots,
         seed=seed,
+        product_terms=product_terms,
     )

@@ -12,7 +12,6 @@ from app.models.reddit import (
     RedditBrand,
     RedditComment,
     RedditCommunity,
-    RedditKeyword,
     RedditPost,
     RedditPostMetric,
     RedditProduct,
@@ -68,9 +67,6 @@ def delete_client_site(db: Session, site_id: int) -> None:
         synchronize_session=False
     )
     db.query(RedditCommunity).filter(RedditCommunity.site_id == site_id).delete(
-        synchronize_session=False
-    )
-    db.query(RedditKeyword).filter(RedditKeyword.site_id == site_id).delete(
         synchronize_session=False
     )
     brand_ids = [

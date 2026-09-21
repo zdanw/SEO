@@ -5,7 +5,6 @@ export type ReviewStatus =
   | 'draft' | 'pending_review' | 'approved' | 'rejected' | 'posting' | 'posted' | 'failed'
 export type AccountRole = 'warmup' | 'seeding' | 'expert'
 export type AccountStage = 'warmup_week1_2' | 'warmup_week3_4' | 'ready' | 'active' | 'warning' | 'suspended'
-export type KeywordCategory = 'seo' | 'ai_hot'
 export type CommunityCategory = 'core' | 'longtail'
 export type CommunityPurpose = 'persona' | 'promo'
 export type ContentIntent = 'casual' | 'promo'
@@ -130,17 +129,6 @@ export interface RedditCommunity {
   updated_at: string
 }
 
-export interface RedditKeyword {
-  id: number
-  keyword: string
-  category: KeywordCategory
-  intent_note?: string | null
-  priority: number
-  used_count: number
-  last_used_at?: string | null
-  created_at: string
-}
-
 export interface RedditMetric {
   id: number
   post_id: number
@@ -176,6 +164,7 @@ export interface RedditBrandProduct {
   name: string
   category: string
   talking_points: string[]
+  keywords?: string[]
   is_active: boolean
   community_ids?: number[]
   community_names?: string[]
@@ -242,23 +231,6 @@ export function deleteCommunity(id: number) {
   return http.delete<any, void>(`/reddit/communities/${id}`)
 }
 
-// ============ 关键词双词库 ============
-export function listRedditKeywords(params?: { category?: KeywordCategory }) {
-  return http.get<any, RedditKeyword[]>('/reddit/keywords', { params })
-}
-
-export function createRedditKeyword(payload: Partial<RedditKeyword>) {
-  return http.post<any, RedditKeyword>('/reddit/keywords', payload)
-}
-
-export function updateRedditKeywordRow(id: number, payload: Partial<RedditKeyword>) {
-  return http.patch<any, RedditKeyword>(`/reddit/keywords/${id}`, payload)
-}
-
-export function deleteRedditKeywordRow(id: number) {
-  return http.delete<any, void>(`/reddit/keywords/${id}`)
-}
-
 // ============ Zernio Key ============
 export function listZernioKeys() {
   return http.get<any, ZernioKey[]>('/reddit/zernio-keys')
@@ -305,6 +277,7 @@ export function createBrandProduct(brandId: number, payload: {
   name: string
   category?: string
   talking_points?: string[]
+  keywords?: string[]
   is_active?: boolean
   community_ids?: number[]
 }) {
@@ -315,6 +288,7 @@ export function updateBrandProduct(productId: number, payload: {
   name?: string
   category?: string
   talking_points?: string[]
+  keywords?: string[]
   is_active?: boolean
   community_ids?: number[]
 }) {
@@ -327,7 +301,7 @@ export function deleteBrandProduct(productId: number) {
 
 export function smartDiscoverReddit(payload: {
   account_id: number
-  limit?: number
+  subreddits: string[]
   brand_id?: number
   product_id?: number
 }) {
