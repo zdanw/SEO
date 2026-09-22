@@ -1,6 +1,7 @@
 """Reddit 自动化 Celery 任务（方案 第九章：自动化落地体系）。
 
-- publish_scheduled_reddit_content: 定时发布（每 15 分钟扫描到期任务）
+- publish_scheduled_reddit_content: 扫描到期任务并按 ID 去重入队
+- publish_reddit_post_by_id / publish_reddit_comment_by_id: 单条发布（含软超时）
 - sync_reddit_post_metrics: 帖子发布后数据自动汇总（每日）
 - reddit_account_health_check: 账号健康检查与风控预警（每日）
 """
@@ -9,33 +10,184 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from celery import shared_task
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
 from app.core.database import SessionLocal
 from app.models.reddit import RedditAccountProfile, RedditComment, RedditPost, RedditPostMetric
-from app.services.reddit_publish import publish_comment_now, publish_post_now
+from app.services.reddit_publish import (
+    publish_comment_now,
+    publish_post_now,
+    recover_stale_posting,
+)
 from app.services.reddit_risk import (
     clear_warning,
     ensure_karma_stage_consistency,
     get_account_daily_usage,
     mark_warning,
 )
+from app.utils.rate_limiter import get_redis
 
 logger = logging.getLogger(__name__)
+
+# Beat 每 15 分钟扫一次；锁 TTL 略短，避免永久占坑
+_ENQUEUE_TTL_SEC = 14 * 60
+_PUBLISH_SOFT_LIMIT = 55
+_PUBLISH_HARD_LIMIT = 70
+
+
+def try_enqueue_publish(kind: str, item_id: int, task) -> bool:
+    """按业务 ID 去重入队。已有未过期锁则跳过，避免队列堆同 ID 任务。"""
+    r = get_redis()
+    key = f"enqueue:reddit:publish:{kind}:{item_id}"
+    if not r.set(key, "1", nx=True, ex=_ENQUEUE_TTL_SEC):
+        return False
+    try:
+        task.apply_async(
+            args=[item_id],
+            task_id=f"reddit-publish-{kind}-{item_id}",
+        )
+        return True
+    except Exception:
+        r.delete(key)
+        raise
+
+
+def _clear_enqueue_lock(kind: str, item_id: int) -> None:
+    try:
+        get_redis().delete(f"enqueue:reddit:publish:{kind}:{item_id}")
+    except Exception:
+        logger.debug("clear enqueue lock failed kind=%s id=%s", kind, item_id, exc_info=True)
+
+
+def _mark_post_timeout(db: Session, post_id: int) -> None:
+    post = db.query(RedditPost).filter(RedditPost.id == post_id).first()
+    if post and post.status == "posting" and not post.reddit_post_id:
+        post.status = "failed"
+        post.error_message = "发布超时，请重试"
+        db.commit()
+
+
+def _mark_comment_timeout(db: Session, comment_id: int) -> None:
+    comment = db.query(RedditComment).filter(RedditComment.id == comment_id).first()
+    if comment and comment.status == "posting" and not comment.reddit_comment_id:
+        comment.status = "failed"
+        comment.error_message = "发布超时，请重试"
+        db.commit()
+
+
+@celery_app.task(
+    name="app.tasks.reddit_tasks.publish_reddit_post_by_id",
+    soft_time_limit=_PUBLISH_SOFT_LIMIT,
+    time_limit=_PUBLISH_HARD_LIMIT,
+)
+def publish_reddit_post_by_id(post_id: int) -> dict:
+    """单条帖子发布；软超时后记 failed，不清空正文。"""
+    db: Session = SessionLocal()
+    run = None
+    try:
+        from app.models.task_run import finish_task_run, start_task_run
+
+        post = db.query(RedditPost).filter(RedditPost.id == post_id).first()
+        if not post:
+            return {"ok": False, "reason": "missing"}
+        run = start_task_run(
+            db,
+            task_name="publish_reddit_post_by_id",
+            business_type="reddit_post",
+            business_id=post_id,
+            site_id=post.site_id,
+        )
+        try:
+            publish_post_now(db, post)
+        except SoftTimeLimitExceeded:
+            db.rollback()
+            _mark_post_timeout(db, post_id)
+            finish_task_run(db, run, status="failed", error_message="发布超时")
+            logger.warning("Publish post #%s soft-timeout", post_id)
+            return {"ok": False, "reason": "timeout"}
+        except Exception as exc:
+            logger.warning("Publish post #%s failed: %s", post_id, exc)
+            db.rollback()
+            finish_task_run(db, run, status="failed", error_message=str(exc))
+            return {"ok": False, "reason": str(exc)}
+        db.refresh(post)
+        finish_task_run(db, run, status="success", meta_update={"status": post.status})
+        return {"ok": True, "status": post.status, "post_id": post_id}
+    finally:
+        _clear_enqueue_lock("post", post_id)
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.reddit_tasks.publish_reddit_comment_by_id",
+    soft_time_limit=_PUBLISH_SOFT_LIMIT,
+    time_limit=_PUBLISH_HARD_LIMIT,
+)
+def publish_reddit_comment_by_id(comment_id: int) -> dict:
+    """单条评论发布；软超时后记 failed。"""
+    db: Session = SessionLocal()
+    run = None
+    try:
+        from app.models.task_run import finish_task_run, start_task_run
+
+        comment = db.query(RedditComment).filter(RedditComment.id == comment_id).first()
+        if not comment:
+            return {"ok": False, "reason": "missing"}
+        run = start_task_run(
+            db,
+            task_name="publish_reddit_comment_by_id",
+            business_type="reddit_comment",
+            business_id=comment_id,
+            site_id=comment.site_id,
+        )
+        try:
+            publish_comment_now(db, comment)
+        except SoftTimeLimitExceeded:
+            db.rollback()
+            _mark_comment_timeout(db, comment_id)
+            finish_task_run(db, run, status="failed", error_message="发布超时")
+            logger.warning("Publish comment #%s soft-timeout", comment_id)
+            return {"ok": False, "reason": "timeout"}
+        except Exception as exc:
+            logger.warning("Publish comment #%s failed: %s", comment_id, exc)
+            db.rollback()
+            finish_task_run(db, run, status="failed", error_message=str(exc))
+            return {"ok": False, "reason": str(exc)}
+        db.refresh(comment)
+        finish_task_run(db, run, status="success", meta_update={"status": comment.status})
+        return {"ok": True, "status": comment.status, "comment_id": comment_id}
+    finally:
+        _clear_enqueue_lock("comment", comment_id)
+        db.close()
+
+
+@celery_app.task(name="app.tasks.reddit_tasks.recover_stale_reddit_posting")
+def recover_stale_reddit_posting() -> dict:
+    """回收超时仍无外部 ID 的 posting → failed。"""
+    db: Session = SessionLocal()
+    try:
+        recovered = recover_stale_posting(db, timeout_minutes=15)
+        if recovered:
+            logger.info("Recovered %d stale reddit posting records", recovered)
+        return {"recovered": recovered}
+    finally:
+        db.close()
 
 
 @celery_app.task(name="app.tasks.reddit_tasks.publish_scheduled_reddit_content")
 def publish_scheduled_reddit_content() -> dict:
-    """扫描到期的定时帖子/评论并自动发布（分时段发布，避免集中触发风控）。"""
+    """扫描到期的定时帖子/评论，按 ID 去重后入队（不在本任务内同步发布）。"""
     db: Session = SessionLocal()
-    published_posts = 0
-    published_comments = 0
+    queued_posts = 0
+    queued_comments = 0
+    skipped_posts = 0
+    skipped_comments = 0
     try:
         now = datetime.utcnow()
         posts = (
-            db.query(RedditPost)
+            db.query(RedditPost.id)
             .filter(
                 RedditPost.status == "approved",
                 RedditPost.scheduled_at.isnot(None),
@@ -44,16 +196,14 @@ def publish_scheduled_reddit_content() -> dict:
             .limit(20)
             .all()
         )
-        for post in posts:
-            try:
-                publish_post_now(db, post)
-                published_posts += 1
-            except Exception as exc:  # 单条失败不阻塞其他任务
-                logger.warning("Scheduled post #%s publish failed: %s", post.id, exc)
-                db.rollback()
+        for (post_id,) in posts:
+            if try_enqueue_publish("post", post_id, publish_reddit_post_by_id):
+                queued_posts += 1
+            else:
+                skipped_posts += 1
 
         comments = (
-            db.query(RedditComment)
+            db.query(RedditComment.id)
             .filter(
                 RedditComment.status == "approved",
                 RedditComment.scheduled_at.isnot(None),
@@ -62,21 +212,26 @@ def publish_scheduled_reddit_content() -> dict:
             .limit(50)
             .all()
         )
-        for comment in comments:
-            try:
-                publish_comment_now(db, comment)
-                published_comments += 1
-            except Exception as exc:
-                logger.warning("Scheduled comment #%s publish failed: %s", comment.id, exc)
-                db.rollback()
+        for (comment_id,) in comments:
+            if try_enqueue_publish("comment", comment_id, publish_reddit_comment_by_id):
+                queued_comments += 1
+            else:
+                skipped_comments += 1
 
-        if published_posts or published_comments:
+        if queued_posts or queued_comments or skipped_posts or skipped_comments:
             logger.info(
-                "Scheduled reddit content: %d posts, %d comments published",
-                published_posts,
-                published_comments,
+                "Scheduled reddit enqueue: posts=%d skip=%d comments=%d skip=%d",
+                queued_posts,
+                skipped_posts,
+                queued_comments,
+                skipped_comments,
             )
-        return {"published_posts": published_posts, "published_comments": published_comments}
+        return {
+            "queued_posts": queued_posts,
+            "queued_comments": queued_comments,
+            "skipped_posts": skipped_posts,
+            "skipped_comments": skipped_comments,
+        }
     finally:
         db.close()
 
@@ -258,7 +413,7 @@ def discover_reddit_discussions() -> dict:
             product_id = product.id if product else None
 
             def _search(subreddit: str, keyword: str, limit: int, _client=client):
-                return _client.list_feed(subreddit, limit=limit)
+                return _client.search_posts(subreddit, keyword, limit=limit)
 
             def _generate(item: dict, intent: str, _account=account, _ctx=ctx) -> None:
                 try:

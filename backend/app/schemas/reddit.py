@@ -140,7 +140,8 @@ class RedditPostGenerateIn(BaseModel):
     account_id: int
     post_type: PostType
     subreddit: str = Field(min_length=1, max_length=100)
-    keyword: str = Field(default="", max_length=200)
+    brand_id: Optional[int] = None
+    product_id: Optional[int] = None
     include_site_url: bool = False
 
 
@@ -304,6 +305,7 @@ class RedditCommunitySuggestOut(BaseModel):
 class RedditProductIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     category: str = Field(default="", max_length=120)
+    description: str = Field(default="", max_length=2000)
     talking_points: list[str] = Field(default_factory=list, max_length=8)
     keywords: list[str] = Field(default_factory=list, max_length=20)
     is_active: bool = True
@@ -313,6 +315,7 @@ class RedditProductIn(BaseModel):
 class RedditProductUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=120)
     category: Optional[str] = Field(default=None, max_length=120)
+    description: Optional[str] = Field(default=None, max_length=2000)
     talking_points: Optional[list[str]] = Field(default=None, max_length=8)
     keywords: Optional[list[str]] = Field(default=None, max_length=20)
     is_active: Optional[bool] = None
@@ -322,8 +325,10 @@ class RedditProductUpdate(BaseModel):
 class RedditProductOut(BaseModel):
     id: int
     brand_id: int
+    brand_name: str = ""
     name: str
     category: str = ""
+    description: str = ""
     talking_points: list[str] = Field(default_factory=list)
     keywords: list[str] = Field(default_factory=list)
     is_active: bool = True

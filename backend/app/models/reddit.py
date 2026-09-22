@@ -232,6 +232,7 @@ class RedditProduct(Base):
     )
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     category: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
     talking_points: Mapped[list | None] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

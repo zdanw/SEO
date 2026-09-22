@@ -3,17 +3,19 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.api.deps import SiteContext, get_current_user, get_site_context, require_site_write
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.keyword import Keyword
 from app.models.serp_rank import SerpRankSnapshot
 from app.models.user import User
 from app.schemas.monitor import LatestRankOut, SerpRankSnapshotOut
 from app.services.serp_crawler import get_serp_crawler
+from app.services.serp_provider import get_serp_quota_remaining, get_serp_quota_used
 from app.tasks.serp_tasks import crawl_keyword_rank
 
 router = APIRouter()
@@ -23,14 +25,24 @@ router = APIRouter()
 def get_serp_config(
     current_user: User = Depends(get_current_user),
 ):
+    _ = current_user
     crawler = get_serp_crawler()
     if crawler.is_scrapingbee:
         mode = "scrapingbee"
-    elif crawler.is_mock:
-        mode = "mock"
-    else:
+    elif crawler.is_proxy:
         mode = "proxy"
-    return {"mode": mode}
+    else:
+        mode = "mock"
+    return {
+        "mode": mode,
+        "allow_proxy_fallback": settings.SERP_ALLOW_PROXY_FALLBACK,
+        "daily_quota": settings.SERP_DAILY_QUOTA,
+        "quota_used_today": get_serp_quota_used(),
+        "quota_remaining_today": get_serp_quota_remaining()
+        if settings.SERP_DAILY_QUOTA > 0
+        else None,
+        "note": "默认优先合规 SERP API；代理直抓需 SERP_ALLOW_PROXY_FALLBACK=true。",
+    }
 
 
 @router.get("/snapshots", response_model=list[SerpRankSnapshotOut])
@@ -79,7 +91,10 @@ def get_trends(
                avg(rank) AS avg_rank,
                max(crawl_status) AS last_status
         FROM serp_rank_snapshots
-        WHERE keyword_id = ANY(:ids) AND time >= :start
+        WHERE keyword_id = ANY(:ids)
+          AND time >= :start
+          AND crawl_status = 'success'
+          AND rank IS NOT NULL
         GROUP BY keyword_id, bucket
         ORDER BY bucket ASC
         """
@@ -132,6 +147,7 @@ def get_latest_ranks(
 @router.post("/crawl/{keyword_id}")
 def trigger_crawl(
     keyword_id: int,
+    request: Request,
     db: Session = Depends(get_db),
     ctx: SiteContext = Depends(require_site_write),
 ):
@@ -142,5 +158,6 @@ def trigger_crawl(
     )
     if not kw:
         raise HTTPException(404, "关键词不存在")
-    task = crawl_keyword_rank.delay(keyword_id)
-    return {"task_id": task.id, "keyword": kw.keyword}
+    request_id = getattr(request.state, "request_id", None)
+    task = crawl_keyword_rank.delay(keyword_id, request_id=request_id)
+    return {"task_id": task.id, "keyword": kw.keyword, "request_id": request_id}

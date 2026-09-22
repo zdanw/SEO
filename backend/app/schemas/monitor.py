@@ -4,7 +4,7 @@ from typing import Optional, Literal
 
 from pydantic import BaseModel, Field, ConfigDict
 
-CrawlStatus = Literal["success", "blocked", "timeout", "error"]
+CrawlStatus = Literal["success", "not_found", "blocked", "timeout", "error"]
 
 
 # ============ SERP 排名快照 ============

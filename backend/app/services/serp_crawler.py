@@ -1,11 +1,12 @@
-"""Google SERP 爬虫服务。
+"""Google SERP 爬虫服务（实现 SERPProvider 契约）。
 
-模式（优先级从高到低）：
-1. ScrapingBee 模式（SCRAPINGBEE_API_KEY）：调用 Google Search API，返回结构化 JSON。
-2. 代理模式（PROXY_LIST / PROXY_ENDPOINT）：httpx + 代理访问 Google，BeautifulSoup 解析。
-3. Mock 模式（以上均未配置）：生成随机排名 1-100，同关键词同日结果稳定。
+模式（合规优先）：
+1. ScrapingBee（SCRAPINGBEE_API_KEY）
+2. 代理直抓（仅当 SERP_ALLOW_PROXY_FALLBACK=true 且配置了代理）
+3. Mock（以上均不可用）
 
-竞品抓取（P3.7）：在抓取 SERP 时同时遍历结果列表，匹配用户配置的竞品域名。
+业务任务应通过 get_serp_crawler().crawl() 或 Provider.fetch() 调用，
+不要绑定某一供应商实现。
 """
 from __future__ import annotations
 
@@ -13,15 +14,28 @@ import hashlib
 import logging
 import random
 import re
-from dataclasses import dataclass, field
+import time
 from datetime import datetime
 from typing import Optional
 
 import httpx
 
 from app.core.config import settings
-from app.utils.proxy import get_proxy_pool, ProxyInfo
-from app.utils.rate_limiter import acquire_token, CircuitBreaker, CircuitBreakerOpen, RateLimitExceeded
+from app.services.serp_provider import (
+    SERPProvider,
+    SerpFetchResult,
+    SerpQuery,
+    normalize_fetch_result,
+    resolve_provider_name,
+    try_consume_serp_quota,
+)
+from app.utils.proxy import get_proxy_pool
+from app.utils.rate_limiter import (
+    CircuitBreaker,
+    CircuitBreakerOpen,
+    RateLimitExceeded,
+    acquire_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +47,9 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:131.0) Gecko/20100101 Firefox/131.0",
 ]
+
+# 向后兼容旧名称
+SerpResult = SerpFetchResult
 
 
 class SerpCrawlError(RuntimeError):
@@ -47,40 +64,40 @@ class SerpTimeoutError(SerpCrawlError):
     """请求超时。"""
 
 
-@dataclass
-class SerpResult:
-    """单次 SERP 抓取结果。"""
-    keyword: str
-    region: str
-    organic_results: list[dict] = field(default_factory=list)
-    target_rank: Optional[int] = None
-    target_page: Optional[int] = None
-    serp_features: dict = field(default_factory=dict)
-    crawl_status: str = "success"
-    error_message: Optional[str] = None
-    proxy_used: Optional[str] = None
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
-
-
-def _has_proxy_config() -> bool:
-    return bool(settings.PROXY_LIST or settings.PROXY_ENDPOINT)
+class SerpQuotaExceeded(SerpCrawlError):
+    """日采集配额已用尽。"""
 
 
 class SerpCrawler:
-    """SERP 爬虫主类。"""
+    """SERP 爬虫主类，同时实现 SERPProvider。"""
+
+    name = "serp_crawler"
 
     def __init__(self) -> None:
-        self._scrapingbee_mode = bool(settings.SCRAPINGBEE_API_KEY)
-        self._mock_mode = not self._scrapingbee_mode and not _has_proxy_config()
+        self._provider_name = resolve_provider_name()
         self._pool = get_proxy_pool()
 
     @property
     def is_mock(self) -> bool:
-        return self._mock_mode
+        return self._provider_name == "mock"
 
     @property
     def is_scrapingbee(self) -> bool:
-        return self._scrapingbee_mode
+        return self._provider_name == "scrapingbee"
+
+    @property
+    def is_proxy(self) -> bool:
+        return self._provider_name == "proxy"
+
+    def fetch(self, query: SerpQuery) -> SerpFetchResult:
+        return self.crawl(
+            keyword=query.keyword,
+            target_url=query.target_url,
+            region=query.region,
+            competitor_domains=query.competitor_domains,
+            language=query.language,
+            device=query.device,
+        )
 
     def crawl(
         self,
@@ -88,27 +105,40 @@ class SerpCrawler:
         target_url: Optional[str],
         region: str = "us",
         competitor_domains: list[str] | None = None,
-    ) -> SerpResult:
+        language: str = "en",
+        device: str = "desktop",
+    ) -> SerpFetchResult:
         """抓取单关键词 SERP。"""
+        if not try_consume_serp_quota(1):
+            raise SerpQuotaExceeded("SERP 日配额已用尽，请明天再试或提高 SERP_DAILY_QUOTA")
+
         if not acquire_token("serp", keyword):
             raise RateLimitExceeded(f"SERP 抓取 {keyword} 被限流")
         breaker = CircuitBreaker("serp", keyword)
         if not breaker.allow_request():
             raise CircuitBreakerOpen(f"SERP 抓取 {keyword} 熔断器打开")
+
+        started = time.perf_counter()
         try:
-            if self._scrapingbee_mode:
-                result = self._scrapingbee_crawl(keyword, target_url, region)
-            elif self._mock_mode:
-                result = self._mock_crawl(keyword, target_url, region)
+            if self._provider_name == "scrapingbee":
+                result = self._scrapingbee_crawl(keyword, target_url, region, language)
+            elif self._provider_name == "proxy":
+                result = self._real_crawl(keyword, target_url, region, language)
             else:
-                result = self._real_crawl(keyword, target_url, region)
+                result = self._mock_crawl(keyword, target_url, region, language)
+            result.device = device
+            result.language = language
+            result.duration_ms = int((time.perf_counter() - started) * 1000)
+            if result.estimated_cost is None:
+                result.estimated_cost = float(settings.SERP_EST_COST_PER_REQUEST)
+            result = normalize_fetch_result(result, target_url)
             breaker.record_success()
             if competitor_domains and result.organic_results:
                 result.serp_features["competitor_ranks"] = self._match_competitors(
                     result.organic_results, competitor_domains
                 )
             return result
-        except (SerpBlockedError, SerpTimeoutError):
+        except (SerpBlockedError, SerpTimeoutError, SerpQuotaExceeded):
             breaker.record_failure()
             raise
         except Exception as e:
@@ -117,12 +147,11 @@ class SerpCrawler:
             raise
 
     def _scrapingbee_crawl(
-        self, keyword: str, target_url: Optional[str], region: str
-    ) -> SerpResult:
-        """ScrapingBee Google Search API 模式。"""
+        self, keyword: str, target_url: Optional[str], region: str, language: str
+    ) -> SerpFetchResult:
         params = {
             "search": keyword,
-            "language": "en",
+            "language": language or "en",
             "pages": settings.SCRAPINGBEE_PAGES,
         }
         if region != "global":
@@ -132,64 +161,75 @@ class SerpCrawler:
             with httpx.Client(timeout=float(settings.SCRAPINGBEE_TIMEOUT)) as client:
                 resp = client.get(SCRAPINGBEE_GOOGLE_URL, params=params, headers=headers)
         except httpx.TimeoutException as e:
-            return SerpResult(
+            return SerpFetchResult(
                 keyword=keyword,
                 region=region,
                 crawl_status="timeout",
                 error_message=str(e),
                 proxy_used="scrapingbee",
+                provider="scrapingbee",
+                language=language,
             )
         except httpx.HTTPError as e:
-            return SerpResult(
+            return SerpFetchResult(
                 keyword=keyword,
                 region=region,
                 crawl_status="error",
                 error_message=str(e),
                 proxy_used="scrapingbee",
+                provider="scrapingbee",
+                language=language,
             )
 
         if resp.status_code in (429, 403):
-            return SerpResult(
+            return SerpFetchResult(
                 keyword=keyword,
                 region=region,
                 crawl_status="blocked",
                 error_message=f"ScrapingBee HTTP {resp.status_code}: {resp.text[:200]}",
                 proxy_used="scrapingbee",
+                provider="scrapingbee",
+                language=language,
             )
         if resp.status_code >= 400:
-            return SerpResult(
+            return SerpFetchResult(
                 keyword=keyword,
                 region=region,
                 crawl_status="error",
                 error_message=f"ScrapingBee HTTP {resp.status_code}: {resp.text[:500]}",
                 proxy_used="scrapingbee",
+                provider="scrapingbee",
+                language=language,
             )
 
         try:
             payload = resp.json()
         except ValueError as e:
-            return SerpResult(
+            return SerpFetchResult(
                 keyword=keyword,
                 region=region,
                 crawl_status="error",
                 error_message=f"ScrapingBee 响应非 JSON: {e}",
                 proxy_used="scrapingbee",
+                provider="scrapingbee",
+                language=language,
             )
 
         data = payload.get("body", payload) if isinstance(payload, dict) else {}
         if not isinstance(data, dict):
-            return SerpResult(
+            return SerpFetchResult(
                 keyword=keyword,
                 region=region,
                 crawl_status="error",
                 error_message="ScrapingBee 响应格式异常",
                 proxy_used="scrapingbee",
+                provider="scrapingbee",
+                language=language,
             )
 
         organic = self._parse_scrapingbee_organic(data.get("organic_results") or [])
         target_rank, target_page = self._find_target_rank(organic, target_url)
-
-        return SerpResult(
+        return SerpFetchResult(
             keyword=keyword,
             region=region,
             organic_results=organic,
@@ -197,11 +237,14 @@ class SerpCrawler:
             target_page=target_page,
             serp_features=self._extract_scrapingbee_features(data),
             proxy_used="scrapingbee",
+            provider="scrapingbee",
+            language=language,
             crawl_status="success",
+            estimated_cost=float(settings.SERP_EST_COST_PER_REQUEST),
+            raw_truncated=str(resp.status_code),
         )
 
     def _parse_scrapingbee_organic(self, raw: list[dict]) -> list[dict]:
-        """将 ScrapingBee organic_results 转为统一格式。"""
         sorted_items = sorted(raw, key=lambda x: x.get("position", 9999))
         organic: list[dict] = []
         for rank, item in enumerate(sorted_items, start=1):
@@ -209,16 +252,17 @@ class SerpCrawler:
             if not resolved:
                 continue
             url, domain = resolved
-            organic.append({
-                "rank": rank,
-                "url": url,
-                "title": item.get("title") or "",
-                "domain": domain,
-            })
+            organic.append(
+                {
+                    "rank": rank,
+                    "url": url,
+                    "title": item.get("title") or "",
+                    "domain": domain,
+                }
+            )
         return organic
 
     def _resolve_scrapingbee_item(self, item: dict) -> tuple[str, str] | None:
-        """解析 ScrapingBee 结果项 URL（可能是 /goto 重定向或 displayed_url）。"""
         url = (item.get("url") or "").strip()
         if url.startswith("http"):
             domain = item.get("domain") or self._extract_domain(url)
@@ -254,8 +298,9 @@ class SerpCrawler:
             "number_of_ads": (data.get("meta_data") or {}).get("number_of_ads", 0),
         }
 
-    def _mock_crawl(self, keyword: str, target_url: Optional[str], region: str) -> SerpResult:
-        """Mock 模式：随机生成排名，同关键词同日结果稳定。"""
+    def _mock_crawl(
+        self, keyword: str, target_url: Optional[str], region: str, language: str
+    ) -> SerpFetchResult:
         today = datetime.utcnow().strftime("%Y-%m-%d")
         seed_str = f"{keyword}|{today}|{region}"
         seed = int(hashlib.md5(seed_str.encode()).hexdigest(), 16)
@@ -266,17 +311,19 @@ class SerpCrawler:
 
         organic: list[dict] = []
         for i in range(1, 101):
-            organic.append({
-                "rank": i,
-                "url": f"https://example-mock-{i}.com/{keyword.replace(' ', '-')}",
-                "title": f"{keyword} - Mock Result {i}",
-                "domain": f"example-mock-{i}.com",
-            })
+            organic.append(
+                {
+                    "rank": i,
+                    "url": f"https://example-mock-{i}.com/{keyword.replace(' ', '-')}",
+                    "title": f"{keyword} - Mock Result {i}",
+                    "domain": f"example-mock-{i}.com",
+                }
+            )
         if target_url:
             organic[target_rank - 1]["url"] = target_url
             organic[target_rank - 1]["domain"] = self._extract_domain(target_url)
 
-        return SerpResult(
+        return SerpFetchResult(
             keyword=keyword,
             region=region,
             organic_results=organic,
@@ -284,13 +331,17 @@ class SerpCrawler:
             target_page=target_page,
             serp_features={"mock": True, "featured_snippet": rng.random() < 0.2},
             proxy_used="mock",
+            provider="mock",
+            language=language,
             crawl_status="success",
+            estimated_cost=0.0,
         )
 
-    def _real_crawl(self, keyword: str, target_url: Optional[str], region: str) -> SerpResult:
-        """真实模式：httpx + 代理访问 Google。"""
+    def _real_crawl(
+        self, keyword: str, target_url: Optional[str], region: str, language: str
+    ) -> SerpFetchResult:
         proxy = self._pool.get()
-        params = {"q": keyword, "num": 100, "hl": "en"}
+        params = {"q": keyword, "num": 100, "hl": language or "en"}
         if region != "global":
             params["gl"] = region
         headers = {
@@ -308,38 +359,53 @@ class SerpCrawler:
         except httpx.TimeoutException as e:
             if proxy:
                 self._pool.mark_failed(proxy)
-            return SerpResult(
-                keyword=keyword, region=region,
-                crawl_status="timeout", error_message=str(e),
+            return SerpFetchResult(
+                keyword=keyword,
+                region=region,
+                crawl_status="timeout",
+                error_message=str(e),
                 proxy_used=proxy.url if proxy else None,
+                provider="proxy",
+                language=language,
             )
         except httpx.HTTPError as e:
             if proxy:
                 self._pool.mark_failed(proxy)
-            return SerpResult(
-                keyword=keyword, region=region,
-                crawl_status="error", error_message=str(e),
+            return SerpFetchResult(
+                keyword=keyword,
+                region=region,
+                crawl_status="error",
+                error_message=str(e),
                 proxy_used=proxy.url if proxy else None,
+                provider="proxy",
+                language=language,
             )
 
         if resp.status_code == 429 or "captcha" in resp.text.lower():
             if proxy:
                 self._pool.mark_failed(proxy)
-            return SerpResult(
-                keyword=keyword, region=region,
-                crawl_status="blocked", error_message="Google CAPTCHA/429",
+            return SerpFetchResult(
+                keyword=keyword,
+                region=region,
+                crawl_status="blocked",
+                error_message="Google CAPTCHA/429",
                 proxy_used=proxy.url if proxy else None,
+                provider="proxy",
+                language=language,
             )
 
         organic = self._parse_google_html(resp.text)
         target_rank, target_page = self._find_target_rank(organic, target_url)
-
-        return SerpResult(
-            keyword=keyword, region=region,
+        return SerpFetchResult(
+            keyword=keyword,
+            region=region,
             organic_results=organic,
-            target_rank=target_rank, target_page=target_page,
+            target_rank=target_rank,
+            target_page=target_page,
             serp_features=self._extract_features(resp.text),
             proxy_used=proxy.url if proxy else "direct",
+            provider="proxy",
+            language=language,
             crawl_status="success",
         )
 
@@ -355,8 +421,8 @@ class SerpCrawler:
         return None, None
 
     def _parse_google_html(self, html: str) -> list[dict]:
-        """BeautifulSoup 解析 Google 结果页 organic 结果。"""
         from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(html, "lxml")
         results: list[dict] = []
         for i, div in enumerate(soup.select("div.g"), start=1):
@@ -369,25 +435,31 @@ class SerpCrawler:
                 url = url.split("/url?q=")[1].split("&")[0]
             if url.startswith("http"):
                 domain = re.match(r"https?://([^/]+)", url)
-                results.append({
-                    "rank": i, "url": url, "title": title,
-                    "domain": domain.group(1) if domain else "",
-                })
+                results.append(
+                    {
+                        "rank": i,
+                        "url": url,
+                        "title": title,
+                        "domain": domain.group(1) if domain else "",
+                    }
+                )
         return results
 
     def _extract_features(self, html: str) -> dict:
-        """提取 SERP Features。"""
         from bs4 import BeautifulSoup
+
         soup = BeautifulSoup(html, "lxml")
         return {
             "mock": False,
-            "featured_snippet": bool(soup.select_one("div.g.xpdopen, div[data-featured='1']")),
+            "provider": "proxy",
+            "featured_snippet": bool(
+                soup.select_one("div.g.xpdopen, div[data-featured='1']")
+            ),
             "people_also_ask": len(soup.select("div.related-question-pair")),
             "knowledge_panel": bool(soup.select_one("div.kp-blk")),
         }
 
     def _match_competitors(self, organic: list[dict], domains: list[str]) -> dict:
-        """从 organic 结果中匹配竞品域名。"""
         matched: dict[str, dict] = {}
         normalized = [self._normalize_domain(d) for d in domains]
         for r in organic:
@@ -399,7 +471,6 @@ class SerpCrawler:
         return matched
 
     def _normalize_domain(self, value: str) -> str:
-        """去掉协议和 www 前缀，便于域名匹配。"""
         value = value.strip().lower()
         value = re.sub(r"^https?://", "", value)
         value = value.split("/")[0]
@@ -420,3 +491,14 @@ def get_serp_crawler() -> SerpCrawler:
     if _crawler_singleton is None:
         _crawler_singleton = SerpCrawler()
     return _crawler_singleton
+
+
+def get_serp_provider() -> SERPProvider:
+    """业务侧统一取 Provider，便于日后替换实现。"""
+    return get_serp_crawler()
+
+
+def reset_serp_crawler() -> None:
+    """测试用：清空单例以便切换配置。"""
+    global _crawler_singleton
+    _crawler_singleton = None

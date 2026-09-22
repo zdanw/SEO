@@ -1,26 +1,19 @@
-"""数据大屏 API：汇总卡片、排名趋势、社交漏斗。"""
+"""数据大屏 API：汇总卡片、排名趋势。"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import Integer, cast, func, text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from app.api.deps import SiteContext, get_site_context
 from app.core.database import get_db
 from app.models.keyword import Keyword
+from app.models.reddit import RedditComment, RedditPost, RedditPostMetric
 from app.models.serp_rank import SerpRankSnapshot
-from app.models.social import SocialAccount, SocialPost
 
 router = APIRouter()
-
-
-def _engagement_clicks():
-    return func.coalesce(
-        cast(func.json_extract_path_text(SocialPost.engagement, "clicks"), Integer),
-        0,
-    )
 
 
 def _calc_trend(current: int, previous: int) -> float | None:
@@ -52,6 +45,7 @@ def get_summary(
             .filter(
                 SerpRankSnapshot.keyword_id.in_(kw_ids),
                 SerpRankSnapshot.time >= start,
+                SerpRankSnapshot.crawl_status == "success",
                 SerpRankSnapshot.rank.isnot(None),
                 SerpRankSnapshot.rank <= 10,
             )
@@ -62,6 +56,7 @@ def get_summary(
             .filter(
                 SerpRankSnapshot.keyword_id.in_(kw_ids),
                 SerpRankSnapshot.time >= start,
+                SerpRankSnapshot.crawl_status == "success",
                 SerpRankSnapshot.rank.isnot(None),
             )
             .scalar() or 0
@@ -71,34 +66,52 @@ def get_summary(
         top10_ratio = 0
 
     posted_posts = (
-        db.query(func.count(SocialPost.id))
-        .join(SocialAccount, SocialPost.account_id == SocialAccount.id)
+        db.query(func.count(RedditPost.id))
         .filter(
-            SocialAccount.site_id == site_id,
-            SocialPost.status == "posted",
-            SocialPost.posted_at >= start,
+            RedditPost.site_id == site_id,
+            RedditPost.status == "posted",
+            RedditPost.published_at >= start,
         )
         .scalar() or 0
     )
     prev_posted = (
-        db.query(func.count(SocialPost.id))
-        .join(SocialAccount, SocialPost.account_id == SocialAccount.id)
+        db.query(func.count(RedditPost.id))
         .filter(
-            SocialAccount.site_id == site_id,
-            SocialPost.status == "posted",
-            SocialPost.posted_at >= prev_start,
-            SocialPost.posted_at < prev_end,
+            RedditPost.site_id == site_id,
+            RedditPost.status == "posted",
+            RedditPost.published_at >= prev_start,
+            RedditPost.published_at < prev_end,
         )
         .scalar() or 0
     )
 
-    clicks = (
-        db.query(func.coalesce(func.sum(_engagement_clicks()), 0))
-        .join(SocialAccount, SocialPost.account_id == SocialAccount.id)
+    posted_comments = (
+        db.query(func.count(RedditComment.id))
         .filter(
-            SocialAccount.site_id == site_id,
-            SocialPost.status == "posted",
-            SocialPost.posted_at >= start,
+            RedditComment.site_id == site_id,
+            RedditComment.status == "posted",
+            RedditComment.published_at >= start,
+        )
+        .scalar() or 0
+    )
+    prev_comments = (
+        db.query(func.count(RedditComment.id))
+        .filter(
+            RedditComment.site_id == site_id,
+            RedditComment.status == "posted",
+            RedditComment.published_at >= prev_start,
+            RedditComment.published_at < prev_end,
+        )
+        .scalar() or 0
+    )
+
+    engagement_score = (
+        db.query(func.coalesce(func.sum(RedditPostMetric.score), 0))
+        .join(RedditPost, RedditPostMetric.post_id == RedditPost.id)
+        .filter(
+            RedditPost.site_id == site_id,
+            RedditPost.status == "posted",
+            RedditPost.published_at >= start,
         )
         .scalar() or 0
     )
@@ -112,12 +125,25 @@ def get_summary(
     return {
         "period_days": days,
         "site": {"id": ctx.site.id, "name": ctx.site.name, "domain": ctx.site.domain},
+        "sample": {
+            "rank_scope": "仅统计 crawl_status=success 且 rank 非空的快照",
+            "top10_definition": "成功快照中 rank≤10 的占比",
+            "social_scope": "Reddit 已发布帖/评与帖子 score 汇总（非旧 SocialPost 表）",
+            "time_range": f"近 {days} 天",
+            "disclaimer": "排名变化与社交发帖/互动不做自动因果归因，仅供并列观察。",
+        },
         "cards": [
             {"label": "监控关键词数", "value": active_keyword_count, "trend": None, "color": "#409EFF"},
             {"label": "关键词 Top10 占比", "value": f"{top10_ratio}%", "trend": None, "color": "#67C23A"},
-            {"label": "成功发帖数", "value": posted_posts, "trend": _calc_trend(posted_posts, prev_posted), "color": "#E6A23C"},
-            {"label": "社交引流点击", "value": int(clicks), "trend": None, "color": "#F56C6C"},
+            {"label": "Reddit 成功发帖", "value": posted_posts, "trend": _calc_trend(posted_posts, prev_posted), "color": "#E6A23C"},
+            {
+                "label": "Reddit 评论发布",
+                "value": posted_comments,
+                "trend": _calc_trend(posted_comments, prev_comments),
+                "color": "#F56C6C",
+            },
         ],
+        "extra": {"reddit_post_score_sum": int(engagement_score)},
     }
 
 
@@ -174,65 +200,3 @@ def get_rank_trends(
             "rank": round(float(r["avg_rank"]), 1) if r["avg_rank"] else None,
         })
     return result
-
-
-@router.get("/social-funnel", tags=["数据大屏"])
-def get_social_funnel(
-    days: int = Query(default=7, ge=1, le=365),
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(get_site_context),
-):
-    site_id = ctx.site.id
-    start = datetime.utcnow() - timedelta(days=days)
-
-    total_posts = (
-        db.query(func.count(SocialPost.id))
-        .join(SocialAccount, SocialPost.account_id == SocialAccount.id)
-        .filter(SocialAccount.site_id == site_id, SocialPost.created_at >= start)
-        .scalar() or 0
-    )
-
-    posted_posts = (
-        db.query(func.count(SocialPost.id))
-        .join(SocialAccount, SocialPost.account_id == SocialAccount.id)
-        .filter(
-            SocialAccount.site_id == site_id,
-            SocialPost.status == "posted",
-            SocialPost.posted_at >= start,
-        )
-        .scalar() or 0
-    )
-
-    total_clicks = (
-        db.query(func.coalesce(func.sum(_engagement_clicks()), 0))
-        .join(SocialAccount, SocialPost.account_id == SocialAccount.id)
-        .filter(
-            SocialAccount.site_id == site_id,
-            SocialPost.status == "posted",
-            SocialPost.posted_at >= start,
-        )
-        .scalar() or 0
-    )
-
-    platform_clicks = (
-        db.query(
-            SocialAccount.platform,
-            func.coalesce(func.sum(_engagement_clicks()), 0).label("clicks"),
-        )
-        .join(SocialPost, SocialPost.account_id == SocialAccount.id)
-        .filter(
-            SocialAccount.site_id == site_id,
-            SocialPost.status == "posted",
-            SocialPost.posted_at >= start,
-        )
-        .group_by(SocialAccount.platform)
-        .all()
-    )
-
-    return {
-        "days": days,
-        "total_posts": total_posts,
-        "posted_posts": posted_posts,
-        "total_clicks": int(total_clicks),
-        "by_platform": [{"platform": row[0], "clicks": int(row[1])} for row in platform_clicks],
-    }

@@ -1,17 +1,20 @@
-version: "3.9"
+# 本地开发默认配置。
+# 本地：docker compose up -d  （会自动合并 docker-compose.override.yml，绑定本机端口）
+# 生产：docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#       （显式 -f 不会加载 override，DB/Redis 不映射到宿主机）
 
 services:
   # ========== PostgreSQL + TimescaleDB（时序数据库）==========
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.17.2-pg16
     container_name: seo-postgres
     restart: unless-stopped
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"
     environment:
-      POSTGRES_DB: seo_platform
-      POSTGRES_USER: seo
-      POSTGRES_PASSWORD: seo_dev_pass
+      POSTGRES_DB: ${POSTGRES_DB:-seo_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-seo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-seo_dev_pass}
       TZ: Asia/Shanghai
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -24,21 +27,27 @@ services:
           cpus: "0.5"
           memory: 512M
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U seo -d seo_platform"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # ========== Redis（Celery Broker + Cache）==========
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: seo-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
-    command: redis-server --appendonly yes --requirepass ""
+    expose:
+      - "6379"
     environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-seo_dev_redis}
       TZ: Asia/Shanghai
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-seo_dev_redis}
     volumes:
       - redisdata:/data
     deploy:
@@ -50,7 +59,11 @@ services:
           cpus: "0.25"
           memory: 128M
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test:
+        [
+          "CMD-SHELL",
+          'redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG',
+        ]
       interval: 10s
       timeout: 3s
       retries: 5

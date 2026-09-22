@@ -161,8 +161,10 @@ export interface RedditOverview {
 export interface RedditBrandProduct {
   id: number
   brand_id: number
+  brand_name?: string
   name: string
   category: string
+  description?: string
   talking_points: string[]
   keywords?: string[]
   is_active: boolean
@@ -273,9 +275,14 @@ export function deleteBrand(id: number) {
   return http.delete<any, void>(`/reddit/brands/${id}`)
 }
 
+export function listProducts() {
+  return http.get<any, RedditBrandProduct[]>('/reddit/products')
+}
+
 export function createBrandProduct(brandId: number, payload: {
   name: string
   category?: string
+  description?: string
   talking_points?: string[]
   keywords?: string[]
   is_active?: boolean
@@ -287,6 +294,7 @@ export function createBrandProduct(brandId: number, payload: {
 export function updateBrandProduct(productId: number, payload: {
   name?: string
   category?: string
+  description?: string
   talking_points?: string[]
   keywords?: string[]
   is_active?: boolean
@@ -317,7 +325,8 @@ export function generateRedditPost(payload: {
   account_id: number
   post_type: PostType
   subreddit: string
-  keyword?: string
+  brand_id?: number
+  product_id?: number
   include_site_url?: boolean
 }) {
   return http.post<any, RedditPost>('/reddit/posts/generate', payload)
@@ -345,6 +354,10 @@ export function deleteRedditPost(id: number) {
 
 export function publishRedditPost(id: number) {
   return http.post<any, RedditPost>(`/reddit/posts/${id}/publish`, {})
+}
+
+export function forceFailRedditPost(id: number) {
+  return http.post<any, RedditPost>(`/reddit/posts/${id}/force-fail`, {})
 }
 
 export function scheduleRedditPost(id: number, scheduled_at: string) {
@@ -410,6 +423,10 @@ export function deleteRedditComment(id: number) {
 
 export function publishRedditComment(id: number) {
   return http.post<any, RedditComment>(`/reddit/comments/${id}/publish`, {})
+}
+
+export function forceFailRedditComment(id: number) {
+  return http.post<any, RedditComment>(`/reddit/comments/${id}/force-fail`, {})
 }
 
 export function scheduleRedditComment(id: number, scheduled_at: string) {

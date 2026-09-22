@@ -120,8 +120,38 @@
                   <span v-if="overview">近 7 天产品占比 {{ mixPromoPercent }}%</span>
                 </p>
               </el-form-item>
-              <el-form-item label="主题关键词（可选）">
-                <el-input v-model="postForm.keyword" placeholder="可选；不填则按帖子类型与目标社区自由发挥" />
+              <el-form-item label="产品（可选）">
+                <el-row :gutter="8" style="width: 100%">
+                  <el-col :span="12">
+                    <el-select
+                      v-model="postBrandId"
+                      clearable
+                      placeholder="品牌"
+                      style="width: 100%"
+                      @change="onPostBrandChange"
+                    >
+                      <el-option v-for="b in activeBrands" :key="`pb-${b.id}`" :label="b.name" :value="b.id" />
+                    </el-select>
+                  </el-col>
+                  <el-col :span="12">
+                    <el-select
+                      v-model="postProductId"
+                      clearable
+                      placeholder="产品"
+                      style="width: 100%"
+                    >
+                      <el-option
+                        v-for="p in productsOfPostBrand"
+                        :key="`pp-${p.id}`"
+                        :label="productLabel(p)"
+                        :value="p.id"
+                      />
+                    </el-select>
+                  </el-col>
+                </el-row>
+                <p class="muted" style="margin: 6px 0 0">
+                  选产品后从产品关键词中随机抽一词生成；不选则按帖子类型与社区自由发挥。
+                </p>
               </el-form-item>
               <el-form-item v-if="postForm.post_type === 'pitfall' || postForm.post_type === 'guide'" label="带入站点链接">
                 <el-switch v-model="postForm.include_site_url" />
@@ -150,6 +180,12 @@
               <el-table-column label="意图" width="70">
                 <template #default="{ row }">
                   <el-tag size="small" :type="row.content_intent === 'promo' ? 'warning' : 'info'">{{ intentLabel(row.content_intent) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="关键词" min-width="120" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.keyword">{{ row.keyword }}</span>
+                  <span v-else class="muted">—</span>
                 </template>
               </el-table-column>
               <el-table-column prop="title" label="标题" min-width="150" show-overflow-tooltip />
@@ -182,6 +218,12 @@
                     :loading="publishingPostId === row.id"
                     @click="publishPost(row.id)"
                   >{{ row.status === 'failed' ? '重试发布' : '发布' }}</el-button>
+                  <el-button
+                    v-if="row.status === 'posting'"
+                    size="small"
+                    type="warning"
+                    @click="forceFailPost(row.id)"
+                  >标记失败</el-button>
                   <el-button v-if="row.status === 'approved'" size="small" @click="openSchedule(row)">定时</el-button>
                   <el-button v-if="row.scheduled_at" size="small" @click="cancelSchedule(row)">取消定时</el-button>
                   <el-button v-if="row.status === 'posted'" size="small" @click="syncMetrics(row)">同步数据</el-button>
@@ -199,7 +241,7 @@
           <el-tab-pane label="智能发现" name="smart">
             <p class="muted" style="margin-bottom: 12px">
               选择产品后自动勾选已绑定社区；按产品关键词在社区中搜索相关帖并入队。也可再手动增减社区。
-              <router-link to="/brands">管理品牌产品库</router-link>
+              <router-link to="/products">管理产品</router-link>
             </p>
             <el-form label-position="top" style="max-width: 560px; margin-bottom: 12px">
               <el-form-item label="评论社区" required>
@@ -377,6 +419,12 @@
                 :loading="publishingCommentId === row.id"
                 @click="publishComment(row.id)"
               >{{ row.status === 'failed' ? '重试发布' : '发布' }}</el-button>
+              <el-button
+                v-if="row.status === 'posting'"
+                size="small"
+                type="warning"
+                @click="forceFailComment(row.id)"
+              >标记失败</el-button>
               <el-button v-if="row.status === 'approved'" size="small" @click="openCommentSchedule(row)">定时</el-button>
               <el-button v-if="row.scheduled_at" size="small" @click="cancelCommentSchedule(row)">取消定时</el-button>
               <el-button v-if="row.status !== 'posting'" size="small" type="danger" @click="deleteComment(row)">删除</el-button>
@@ -454,7 +502,7 @@
                   :data="row._comments"
                   size="small"
                   max-height="240"
-                  @selection-change="(rows) => onEngageCommentSelection(row.thing_id, rows)"
+                  @selection-change="(rows: RedditEngageComment[]) => onEngageCommentSelection(row.thing_id, rows)"
                 >
                   <el-table-column type="selection" width="40" :selectable="() => !engageVoting" />
                   <el-table-column prop="author" label="作者" width="100" show-overflow-tooltip />
@@ -589,6 +637,9 @@
     <!-- 编辑帖子弹窗 -->
     <el-dialog v-model="postEditDialog" title="编辑 Reddit 帖子" width="640px">
       <el-form label-position="top">
+        <el-form-item label="使用关键词">
+          <el-input :model-value="postEditForm.keyword || '—'" disabled />
+        </el-form-item>
         <el-form-item label="标题"><el-input v-model="postEditForm.title" /></el-form-item>
         <el-form-item label="子版块"><el-input v-model="postEditForm.subreddit" /></el-form-item>
         <el-form-item label="正文"><el-input v-model="postEditForm.body" type="textarea" :rows="10" /></el-form-item>
@@ -761,9 +812,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { QuestionFilled } from '@element-plus/icons-vue'
 import {
   getRedditStatus,
-  generateRedditPost, listRedditPosts, updateRedditPost, approveRedditPost, publishRedditPost, deleteRedditPost,
+  generateRedditPost, listRedditPosts, updateRedditPost, approveRedditPost, publishRedditPost, forceFailRedditPost, deleteRedditPost,
   generateRedditComment, generateRedditCommentBatch, listRedditComments,
-  updateRedditComment, approveRedditComment, publishRedditComment, deleteRedditComment,
+  updateRedditComment, approveRedditComment, publishRedditComment, forceFailRedditComment, deleteRedditComment,
   searchRedditPosts,
   getRedditOverview, listAccountProfiles, updateAccountProfile,
   listCommunities, createCommunity, updateCommunity, deleteCommunity,
@@ -953,9 +1004,21 @@ const scheduleTime = ref('')
 let scheduleTargetPost: RedditPost | null = null
 let scheduleTargetComment: RedditComment | null = null
 
-const postForm = reactive<{ post_type: PostType; subreddit: string; keyword: string; include_site_url: boolean }>({
-  post_type: 'pitfall', subreddit: '', keyword: '', include_site_url: false,
+const postForm = reactive<{ post_type: PostType; subreddit: string; include_site_url: boolean }>({
+  post_type: 'pitfall', subreddit: '', include_site_url: false,
 })
+const postBrandId = ref<number | null>(null)
+const postProductId = ref<number | null>(null)
+const productsOfPostBrand = computed(() => {
+  const b = brands.value.find((x) => x.id === postBrandId.value)
+  return (b?.products || []).filter((p) => p.is_active !== false)
+})
+
+function onPostBrandChange() {
+  postProductId.value = null
+  const first = productsOfPostBrand.value[0]
+  if (first) postProductId.value = first.id
+}
 
 const postTypeOptions: {
   value: PostType
@@ -1022,7 +1085,7 @@ const commentStatusFilter = ref('')
 const publishingCommentId = ref<number | null>(null)
 
 const postEditDialog = ref(false)
-const postEditForm = reactive({ id: 0, title: '', body: '', subreddit: '' })
+const postEditForm = reactive({ id: 0, title: '', body: '', subreddit: '', keyword: '' })
 const postSaving = ref(false)
 const commentEditDialog = ref(false)
 const commentEditForm = reactive({ id: 0, body: '' })
@@ -1069,12 +1132,27 @@ async function loadPosts() {
 async function handleGeneratePost() {
   if (!selectedAccountId.value) { ElMessage.warning('请选择 Reddit 账号'); return }
   if (!postForm.subreddit) { ElMessage.warning('请选择或填写目标社区（优先人设社区）'); return }
+  if (postProductId.value && !postBrandId.value) {
+    ElMessage.warning('请选择品牌')
+    return
+  }
+  if (postBrandId.value && !postProductId.value) {
+    ElMessage.warning('请选择产品，或不选品牌')
+    return
+  }
+  if (postProductId.value) {
+    const product = productsOfPostBrand.value.find((p) => p.id === postProductId.value)
+    if (!product || !(product.keywords || []).length) {
+      ElMessage.warning('该产品尚未绑定关键词，请先在品牌/产品库中填写')
+      return
+    }
+  }
   const sr = postForm.subreddit.replace(/^r\//i, '').toLowerCase()
   const memeSubs = new Set(['dankmemes', 'memes', 'me_irl', 'shitposting', 'okbuddyretard', 'comedyheaven'])
   if (memeSubs.has(sr)) {
     try {
       await ElMessageBox.confirm(
-        `r/${sr} 偏梗图/沙雕，不太适合长文踩坑/干货。确定仍要生成吗？更建议换到与关键词相关的人设或产品社区。`,
+        `r/${sr} 偏梗图/沙雕，不太适合长文踩坑/干货。确定仍要生成吗？更建议换到与产品相关的人设或产品社区。`,
         '版块可能不匹配',
         { type: 'warning', confirmButtonText: '仍要生成', cancelButtonText: '换社区' },
       )
@@ -1088,7 +1166,8 @@ async function handleGeneratePost() {
       account_id: selectedAccountId.value,
       post_type: postForm.post_type,
       subreddit: postForm.subreddit,
-      keyword: (postForm.keyword || '').trim(),
+      brand_id: postBrandId.value || undefined,
+      product_id: postProductId.value || undefined,
       include_site_url: postForm.include_site_url,
     })
     ElMessage.success('已生成，请在审核队列中编辑/批准')
@@ -1101,6 +1180,7 @@ function openPostEdit(row: RedditPost) {
   postEditForm.title = row.title
   postEditForm.body = row.body
   postEditForm.subreddit = row.subreddit
+  postEditForm.keyword = row.keyword || ''
   postEditDialog.value = true
 }
 
@@ -1137,6 +1217,19 @@ async function publishPost(id: number) {
     else ElMessage.error(`发布失败：${r.error_message || r.status}`)
     loadPosts()
   } finally { publishingPostId.value = null }
+}
+
+async function forceFailPost(id: number) {
+  try {
+    await ElMessageBox.confirm('将发布中任务标记为失败，之后可重试。确定？', '标记失败', {
+      type: 'warning',
+      confirmButtonText: '标记失败',
+      cancelButtonText: '取消',
+    })
+  } catch { return }
+  const r = await forceFailRedditPost(id)
+  ElMessage.success(r.error_message || '已标记失败，可重试发布')
+  loadPosts()
 }
 
 async function deletePost(row: RedditPost) {
@@ -1300,6 +1393,19 @@ async function publishComment(id: number) {
   } finally { publishingCommentId.value = null }
 }
 
+async function forceFailComment(id: number) {
+  try {
+    await ElMessageBox.confirm('将发布中任务标记为失败，之后可重试。确定？', '标记失败', {
+      type: 'warning',
+      confirmButtonText: '标记失败',
+      cancelButtonText: '取消',
+    })
+  } catch { return }
+  const r = await forceFailRedditComment(id)
+  ElMessage.success(r.error_message || '已标记失败，可重试发布')
+  loadComments()
+}
+
 async function deleteComment(row: RedditComment) {
   const tip = row.status === 'posted'
     ? '将永久删除本地记录，不会撤回 Reddit 上已发布的评论。确定删除？'
@@ -1313,10 +1419,23 @@ async function deleteComment(row: RedditComment) {
 }
 
 function statusLabel(s: string) {
-  return { pending_review: '待审核', approved: '已批准', posted: '已发布', failed: '失败', rejected: '已拒绝' }[s] || s
+  return {
+    pending_review: '待审核',
+    approved: '已批准',
+    posting: '发布中',
+    posted: '已发布',
+    failed: '失败',
+    rejected: '已拒绝',
+  }[s] || s
 }
 function statusTag(s: string): any {
-  return { pending_review: 'warning', approved: 'primary', posted: 'success', failed: 'danger' }[s] || 'info'
+  return {
+    pending_review: 'warning',
+    approved: 'primary',
+    posting: 'info',
+    posted: 'success',
+    failed: 'danger',
+  }[s] || 'info'
 }
 function postTypeLabel(t: string) {
   return {

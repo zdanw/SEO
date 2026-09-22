@@ -83,7 +83,12 @@ from app.services.reddit_mix import (
 )
 from app.services.reddit_persona import parse_persona
 from app.services import reddit_oauth
-from app.services.reddit_publish import publish_comment_now, publish_post_now
+from app.services.reddit_publish import (
+    force_fail_comment,
+    force_fail_post,
+    publish_comment_now,
+    publish_post_now,
+)
 from app.services.reddit_risk import (
     RiskViolation,
     apply_role_defaults,
@@ -136,6 +141,7 @@ def _brief_from_product(brand: RedditBrand, product: RedditProduct) -> dict:
         "brand": brand.name or "",
         "product": product.name or "",
         "category": product.category or "",
+        "description": (product.description or "").strip(),
         "talking_points": product.talking_points or [],
         "competitors": [],
         "never_claim": "",
@@ -149,7 +155,7 @@ def _require_brand_product(
     product_id: int | None,
 ) -> tuple[RedditBrand, RedditProduct]:
     if not brand_id or not product_id:
-        raise HTTPException(status_code=400, detail="产品向评论请选择品牌和产品")
+        raise HTTPException(status_code=400, detail="请选择品牌和产品")
     brand = (
         db.query(RedditBrand)
         .filter(RedditBrand.id == brand_id, RedditBrand.site_id == site_id, RedditBrand.is_active.is_(True))
@@ -196,11 +202,16 @@ def _fill_comment_out(db: Session, comment: RedditComment) -> RedditComment:
 def _product_out(product: RedditProduct) -> RedditProductOut:
     communities = sorted(product.communities or [], key=lambda c: c.id)
     keywords = [r.keyword for r in (product.keyword_rows or [])]
+    brand_name = ""
+    if getattr(product, "brand", None) is not None:
+        brand_name = product.brand.name or ""
     return RedditProductOut(
         id=product.id,
         brand_id=product.brand_id,
+        brand_name=brand_name,
         name=product.name,
         category=product.category or "",
+        description=product.description or "",
         talking_points=product.talking_points or [],
         keywords=keywords,
         is_active=product.is_active,
@@ -211,13 +222,18 @@ def _product_out(product: RedditProduct) -> RedditProductOut:
     )
 
 
-def _set_product_keywords(product: RedditProduct, keywords: list[str] | None) -> None:
+def _set_product_keywords(
+    db: Session,
+    product: RedditProduct,
+    keywords: list[str] | None,
+) -> None:
     from app.services.reddit_discover import normalize_product_keywords
 
     cleaned = normalize_product_keywords(keywords)
-    product.keyword_rows = [
-        RedditProductKeyword(keyword=kw) for kw in cleaned
-    ]
+    # 先删后插，避免同 (product_id, keyword) 唯一约束在「先插后删」时冲突
+    product.keyword_rows.clear()
+    db.flush()
+    product.keyword_rows = [RedditProductKeyword(keyword=kw) for kw in cleaned]
 
 
 def _set_product_communities(
@@ -506,7 +522,23 @@ def generate_post(
 
     persona_prompt = _persona_prompt_for(db, ctx.site.id, account.id)
     product_brief = None
-    keyword = (payload.keyword or "").strip()
+    keyword = ""
+    if payload.product_id:
+        brand, product = _require_brand_product(
+            db, ctx.site.id, payload.brand_id, payload.product_id
+        )
+        from app.services.reddit_discover import (
+            pick_promo_search_keyword,
+            product_search_terms,
+        )
+
+        terms = product_search_terms(
+            keywords=[r.keyword for r in (product.keyword_rows or [])],
+        )
+        if not terms:
+            raise HTTPException(status_code=400, detail="该产品尚未绑定关键词，请先在品牌/产品库中填写")
+        keyword = pick_promo_search_keyword(terms)
+        product_brief = _brief_from_product(brand, product)
     recent_titles = [
         row[0]
         for row in (
@@ -655,6 +687,23 @@ def publish_post(
         raise _mix_http(exc) from exc
     except RiskViolation as exc:
         raise _risk_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _fill_post_out(post)
+
+
+@router.post("/posts/{post_id}/force-fail", response_model=RedditPostOut)
+def force_fail_post_endpoint(
+    post_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+) -> RedditPost:
+    """将卡住的 posting（无外部 ID）标为 failed，便于重试。"""
+    post = db.query(RedditPost).filter(RedditPost.id == post_id, RedditPost.site_id == ctx.site.id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="发帖任务不存在")
+    try:
+        post = force_fail_post(db, post)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _fill_post_out(post)
@@ -959,6 +1008,26 @@ def publish_comment(
         raise _mix_http(exc) from exc
     except RiskViolation as exc:
         raise _risk_http(exc) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _fill_comment_out(db, comment)
+
+
+@router.post("/comments/{comment_id}/force-fail", response_model=RedditCommentOut)
+def force_fail_comment_endpoint(
+    comment_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+) -> RedditComment:
+    comment = (
+        db.query(RedditComment)
+        .filter(RedditComment.id == comment_id, RedditComment.site_id == ctx.site.id)
+        .first()
+    )
+    if not comment:
+        raise HTTPException(status_code=404, detail="评论任务不存在")
+    try:
+        comment = force_fail_comment(db, comment)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _fill_comment_out(db, comment)
@@ -1587,6 +1656,21 @@ def delete_brand(
     db.commit()
 
 
+@router.get("/products", response_model=list[RedditProductOut])
+def list_products(
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(get_site_context),
+) -> list[RedditProductOut]:
+    rows = (
+        db.query(RedditProduct)
+        .join(RedditBrand, RedditBrand.id == RedditProduct.brand_id)
+        .filter(RedditBrand.site_id == ctx.site.id)
+        .order_by(RedditBrand.id.asc(), RedditProduct.id.asc())
+        .all()
+    )
+    return [_product_out(p) for p in rows]
+
+
 @router.post(
     "/brands/{brand_id}/products",
     response_model=RedditProductOut,
@@ -1610,13 +1694,14 @@ def create_product(
         brand_id=brand.id,
         name=name,
         category=(payload.category or "").strip(),
+        description=(payload.description or "").strip()[:2000] or None,
         talking_points=[p.strip() for p in payload.talking_points if p.strip()][:8],
         is_active=payload.is_active,
     )
     db.add(row)
     db.flush()
     _set_product_communities(db, site_id=ctx.site.id, product=row, community_ids=payload.community_ids or [])
-    _set_product_keywords(row, payload.keywords)
+    _set_product_keywords(db, row, payload.keywords)
     db.commit()
     db.refresh(row)
     return _product_out(row)
@@ -1644,6 +1729,8 @@ def update_product(
         data["name"] = data["name"].strip()
     if "category" in data and data["category"] is not None:
         data["category"] = data["category"].strip()
+    if "description" in data and data["description"] is not None:
+        data["description"] = data["description"].strip()[:2000] or None
     if "talking_points" in data and data["talking_points"] is not None:
         data["talking_points"] = [p.strip() for p in data["talking_points"] if p.strip()][:8]
     for k, v in data.items():
@@ -1651,7 +1738,7 @@ def update_product(
     if community_ids is not None:
         _set_product_communities(db, site_id=ctx.site.id, product=row, community_ids=community_ids)
     if keywords is not None:
-        _set_product_keywords(row, keywords)
+        _set_product_keywords(db, row, keywords)
     db.commit()
     db.refresh(row)
     return _product_out(row)

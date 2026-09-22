@@ -10,6 +10,12 @@ export interface DashboardCard {
 export interface DashboardSummary {
   period_days: number
   cards: DashboardCard[]
+  sample?: {
+    rank_scope: string
+    top10_definition: string
+    time_range: string
+    disclaimer: string
+  }
 }
 
 export interface TrendPoint {
@@ -18,19 +24,6 @@ export interface TrendPoint {
 }
 
 export type RankTrendsData = Record<number, TrendPoint[]>
-
-export interface SocialFunnelItem {
-  platform: string
-  clicks: number
-}
-
-export interface SocialFunnel {
-  days: number
-  total_posts: number
-  posted_posts: number
-  total_clicks: number
-  by_platform: SocialFunnelItem[]
-}
 
 export function getDashboardSummary(days = 7) {
   return http.get<any, DashboardSummary>('/dashboard/summary', { params: { days } })
@@ -42,8 +35,4 @@ export function getRankTrends(keyword_ids?: number[], days = 14) {
     params.keyword_ids = keyword_ids.join(',')
   }
   return http.get<any, RankTrendsData>('/dashboard/rank-trends', { params })
-}
-
-export function getSocialFunnel(days = 7) {
-  return http.get<any, SocialFunnel>('/dashboard/social-funnel', { params: { days } })
 }

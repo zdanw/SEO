@@ -250,6 +250,57 @@ def test_run_smart_discover_promo_skips_when_no_product_terms():
     assert result["queued"] == 0
 
 
+def test_run_smart_discover_promo_retries_next_keyword_when_no_match():
+    now = int(datetime.now(timezone.utc).timestamp())
+    searched: list[str] = []
+    generated: list[str] = []
+
+    def feed(subreddit, keyword, limit):
+        searched.append(keyword)
+        if keyword == "no results phrase":
+            return [
+                {
+                    "title": "unrelated parenting chat",
+                    "url": "https://www.reddit.com/r/x/comments/aaa/hi/",
+                    "thing_id": "t3_aaa",
+                    "subreddit": subreddit,
+                    "score": 4,
+                    "created_utc": now - 600,
+                    "body": "",
+                }
+            ]
+        return [
+            {
+                "title": "anyone tried wearable breast pump?",
+                "url": "https://www.reddit.com/r/x/comments/bbb/hi/",
+                "thing_id": "t3_bbb",
+                "subreddit": subreddit,
+                "score": 4,
+                "created_utc": now - 500,
+                "body": "",
+            }
+        ]
+
+    result = run_smart_discover(
+        persona_communities=[],
+        promo_communities=[],
+        already_commented=set(),
+        search_fn=feed,
+        generate_fn=lambda item, intent: generated.append(item["url"]),
+        allow_promo=True,
+        remaining_slots=3,
+        seed=0,
+        targets=[("Buyingforbaby", "promo")],
+        product_terms=["no results phrase", "wearable breast pump"],
+        now=datetime.now(timezone.utc),
+    )
+    assert "no results phrase" in searched
+    assert "wearable breast pump" in searched
+    assert searched.index("no results phrase") < searched.index("wearable breast pump")
+    assert result["queued"] == 1
+    assert generated == ["https://www.reddit.com/r/x/comments/bbb/hi/"]
+
+
 def test_run_smart_discover_promo_skips_unrelated_posts():
     now = int(datetime.now(timezone.utc).timestamp())
     generated: list[str] = []

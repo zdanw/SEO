@@ -2,7 +2,7 @@
   <div class="login-page">
     <el-card class="login-card" shadow="hover">
       <h2 class="title">SEO Platform 登录</h2>
-      <p class="subtitle">综合大屏 · Reddit 社交分发 · 排名监控</p>
+      <p class="subtitle">数据监控 · Reddit 社交分发 · 排名监控</p>
       <el-tabs v-model="tab" class="login-tabs">
         <el-tab-pane label="登录" name="login">
           <el-form ref="loginFormRef" :model="loginForm" :rules="loginRules" label-position="top" size="large">

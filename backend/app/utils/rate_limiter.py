@@ -121,7 +121,14 @@ class BreakerConfig:
 
 BREAKER_CONFIGS: dict[str, BreakerConfig] = {
     "serp": BreakerConfig(),
-    "reddit": BreakerConfig(failure_threshold=5, failure_rate_threshold=0.5, open_duration=3600),
+    # Reddit：更快熔断、更短冷却，避免持续打满外部配额
+    "reddit": BreakerConfig(
+        failure_threshold=3,
+        failure_rate_threshold=0.5,
+        min_requests=6,
+        open_duration=600,
+        half_open_max=2,
+    ),
     "default": BreakerConfig(),
 }
 

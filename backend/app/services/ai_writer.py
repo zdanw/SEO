@@ -640,11 +640,13 @@ class DeepSeekClient:
             product = str(product_brief.get("product") or "").strip()
             points = product_brief.get("talking_points") or []
             never = str(product_brief.get("never_claim") or "").strip()
+            description = str(product_brief.get("description") or "").strip()
+            desc_bit = f" Product info: {description[:800]}." if description else ""
             intent_line = (
                 "Intent: lightly helpful product mention ONLY if the post is already about this category. "
                 f"Brand you may mention once if natural: {brand or '(none)'}. "
                 f"Product to lean toward: {product or '(none)'}. "
-                f"Talking points: {', '.join(str(p) for p in points[:3]) or '(none)'}. "
+                f"Talking points: {', '.join(str(p) for p in points[:3]) or '(none)'}.{desc_bit} "
                 f"Never claim: {never or '(none)'}. No hard sell, no links unless a site URL is provided."
             )
             site_line = (
@@ -694,6 +696,9 @@ def _reddit_post_extra_lines(persona_prompt: str, product_brief: dict | None) ->
             chunks.append(f"Focus this reply around the product: {product}")
         if category:
             chunks.append(f"Category: {category}")
+        description = str(product_brief.get("description") or "").strip()
+        if description:
+            chunks.append(f"Product info for accurate details: {description[:1200]}")
         if points:
             chunks.append("Allowed talking points: " + "; ".join(str(p) for p in points[:3]))
         if comps:

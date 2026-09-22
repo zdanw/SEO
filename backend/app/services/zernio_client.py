@@ -137,7 +137,7 @@ class ZernioClient:
             }
             if json_body is not None:
                 req_kwargs["json"] = json_body
-            with httpx.Client(timeout=self.timeout) as client:
+            with httpx.Client(timeout=httpx.Timeout(float(self.timeout))) as client:
                 resp = client.request(method, url, **req_kwargs)
             if resp.status_code >= 400:
                 msg, retry_after = self._parse_error(resp.status_code, resp.text)
@@ -152,6 +152,13 @@ class ZernioClient:
             return self._unwrap(resp.json())
         except ZernioError:
             raise
+        except httpx.TimeoutException as exc:
+            if breaker is not None:
+                breaker.record_failure()
+            raise ZernioError(
+                f"Zernio 请求超时（{self.timeout}s），请稍后重试",
+                status_code=504,
+            ) from exc
         except Exception as exc:
             if breaker is not None:
                 breaker.record_failure()

@@ -50,6 +50,11 @@ celery_app.conf.update(
             "task": "app.tasks.reddit_tasks.publish_scheduled_reddit_content",
             "schedule": crontab(minute="*/15"),
         },
+        # Reddit：每 5 分钟回收卡住的 posting
+        "reddit-recover-stale-posting": {
+            "task": "app.tasks.reddit_tasks.recover_stale_reddit_posting",
+            "schedule": crontab(minute="*/5"),
+        },
         # Reddit：每日 08:00 汇总已发布帖子互动数据
         "reddit-sync-post-metrics": {
             "task": "app.tasks.reddit_tasks.sync_reddit_post_metrics",

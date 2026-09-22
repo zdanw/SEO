@@ -1,0 +1,24 @@
+# 生产覆盖层：强制强密码；配合
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# 使用（显式 -f 不会加载 override，因此不暴露 5432/6379 到宿主机）。
+#
+# 未设置密码时 Compose 会直接报错退出。
+
+services:
+  postgres:
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-seo_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-seo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD for production}
+      TZ: Asia/Shanghai
+
+  redis:
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD for production}
+      TZ: Asia/Shanghai
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?Set REDIS_PASSWORD for production}

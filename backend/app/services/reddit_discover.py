@@ -129,11 +129,19 @@ def product_search_terms(*, keywords: list[str] | None = None) -> list[str]:
 
 
 def pick_promo_search_keyword(terms: list[str], *, seed: int | None = None) -> str:
+    ordered = shuffled_promo_keywords(terms, seed=seed)
+    return ordered[0] if ordered else ""
+
+
+def shuffled_promo_keywords(terms: list[str], *, seed: int | None = None) -> list[str]:
+    """产品关键词随机顺序，供搜索失败时依次重试。"""
     clean = [t for t in terms if t]
     if not clean:
-        return ""
+        return []
+    out = list(clean)
     rng = random.Random(seed) if seed is not None else random
-    return rng.choice(clean)
+    rng.shuffle(out)
+    return out
 
 
 def relevance_score(item: dict, terms: list[str]) -> int:
@@ -216,7 +224,7 @@ def run_smart_discover(
             allow_promo=allow_promo,
         )
     terms = [t for t in (product_terms or []) if t]
-    promo_keyword = pick_promo_search_keyword(terms, seed=seed)
+    promo_keywords = shuffled_promo_keywords(terms, seed=seed)
     pull_limit = max(feed_limit, 15) if terms else feed_limit
     queued = 0
     skipped = 0
@@ -229,27 +237,59 @@ def run_smart_discover(
         if queued >= remaining_slots:
             break
         if intent == "promo":
-            if not promo_keyword:
+            if not promo_keywords:
                 continue
-            keyword = promo_keyword
+            candidates: list[dict] = []
+            rate_limited = False
+            for keyword in promo_keywords:
+                try:
+                    raw = search_fn(subreddit, keyword, pull_limit)
+                except Exception as exc:
+                    errors += 1
+                    last_error = str(exc)
+                    status = getattr(exc, "status_code", None)
+                    if status == 429 or "429" in last_error:
+                        rate_limited = True
+                        break
+                    continue
+                candidates = prefer_questions(
+                    filter_commentable(raw, already_commented=used_urls, now=now)
+                )
+                candidates = prefer_product_relevant(candidates, terms)
+                if candidates:
+                    break
+            if rate_limited:
+                break
+            if not candidates:
+                continue
         elif intent == "casual":
             keyword = "discussion"
+            try:
+                raw = search_fn(subreddit, keyword, pull_limit)
+            except Exception as exc:
+                errors += 1
+                last_error = str(exc)
+                status = getattr(exc, "status_code", None)
+                if status == 429 or "429" in last_error:
+                    break
+                continue
+            candidates = prefer_questions(
+                filter_commentable(raw, already_commented=used_urls, now=now)
+            )
         else:
             keyword = subreddit
-        try:
-            raw = search_fn(subreddit, keyword, pull_limit)
-        except Exception as exc:
-            errors += 1
-            last_error = str(exc)
-            status = getattr(exc, "status_code", None)
-            if status == 429 or "429" in last_error:
-                break
-            continue
-        candidates = prefer_questions(
-            filter_commentable(raw, already_commented=used_urls, now=now)
-        )
-        if intent == "promo" and terms:
-            candidates = prefer_product_relevant(candidates, terms)
+            try:
+                raw = search_fn(subreddit, keyword, pull_limit)
+            except Exception as exc:
+                errors += 1
+                last_error = str(exc)
+                status = getattr(exc, "status_code", None)
+                if status == 429 or "429" in last_error:
+                    break
+                continue
+            candidates = prefer_questions(
+                filter_commentable(raw, already_commented=used_urls, now=now)
+            )
         for item in candidates[:posts_per_community]:
             if queued >= remaining_slots:
                 break

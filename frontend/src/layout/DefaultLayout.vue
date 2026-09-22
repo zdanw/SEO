@@ -67,8 +67,8 @@
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  DataBoard, Share, TrendCharts, Goods, User,
-  UserFilled, Fold, Expand,
+  DataBoard, Share, TrendCharts, Goods, User, OfficeBuilding,
+  UserFilled, Fold, Expand, Monitor,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 
@@ -80,7 +80,7 @@ const menuGroups = [
   {
     title: '工作台',
     items: [
-      { path: '/dashboard', title: '综合大屏', icon: DataBoard },
+      { path: '/dashboard', title: '数据监控', icon: DataBoard },
     ],
   },
   {
@@ -88,8 +88,10 @@ const menuGroups = [
     items: [
       { path: '/social', title: '社交分发', icon: Share },
       { path: '/accounts', title: '社交账号', icon: User },
-      { path: '/brands', title: '品牌产品库', icon: Goods },
+      { path: '/brands', title: '品牌', icon: OfficeBuilding },
+      { path: '/products', title: '产品', icon: Goods },
       { path: '/serp', title: '排名监控', icon: TrendCharts },
+      { path: '/ops', title: '运维看板', icon: Monitor },
     ],
   },
 ]
@@ -98,8 +100,10 @@ const pageSubtitles: Record<string, string> = {
   '/dashboard': '关键词排名与社交分发核心指标一览',
   '/social': 'Reddit 创作、审核与发布',
   '/accounts': 'Zernio Key 与 Reddit 账号同步管理',
-  '/brands': '品牌与产品资料，供约 10% 产品向评论选用',
+  '/brands': '维护品牌资料',
+  '/products': '产品关键词与社区绑定，供约 10% 产品向评论选用',
   '/serp': 'Google 排名趋势与抓取快照',
+  '/ops': '队列积压、SERP 成本与任务台账',
 }
 
 const activeMenu = computed(() => route.path)

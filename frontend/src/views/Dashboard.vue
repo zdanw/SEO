@@ -30,16 +30,8 @@
             <el-tag v-if="!hasTrendData" type="info" size="small" style="margin-left:8px">暂无数据</el-tag>
             <el-tag v-else-if="rankTrendHint" type="warning" size="small" style="margin-left:8px">{{ rankTrendHint }}</el-tag>
           </template>
+          <p class="sample-note">{{ sampleNote }}</p>
           <div ref="rankChartRef" style="height: 320px"></div>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <el-row :gutter="16">
-      <el-col :span="24">
-        <el-card shadow="hover" class="chart-card">
-          <template #header>社交分发漏斗</template>
-          <div ref="funnelChartRef" style="height: 280px"></div>
         </el-card>
       </el-col>
     </el-row>
@@ -52,7 +44,6 @@ import * as echarts from 'echarts'
 import {
   getDashboardSummary,
   getRankTrends,
-  getSocialFunnel,
   type DashboardCard,
   type TrendPoint,
 } from '@/api/dashboard'
@@ -65,17 +56,16 @@ const loading = ref(false)
 const cards = ref<DashboardCard[]>([])
 const hasTrendData = ref(false)
 const rankTrendHint = ref('')
+const sampleNote = ref('指标仅统计成功抓取样本；排名与社交互动不做自动因果归因。')
 
 const rankChartRef = ref<HTMLDivElement>()
-const funnelChartRef = ref<HTMLDivElement>()
 
 let rankChart: echarts.ECharts | null = null
-let funnelChart: echarts.ECharts | null = null
 
 async function loadAll() {
   loading.value = true
   try {
-    await Promise.all([loadSummary(), loadRankTrends(), loadSocialFunnel()])
+    await Promise.all([loadSummary(), loadRankTrends()])
   } finally {
     loading.value = false
   }
@@ -84,6 +74,9 @@ async function loadAll() {
 async function loadSummary() {
   const data = await getDashboardSummary(periodDays.value)
   cards.value = data.cards
+  if (data.sample) {
+    sampleNote.value = `${data.sample.time_range} · ${data.sample.rank_scope}。${data.sample.disclaimer}`
+  }
 }
 
 async function loadRankTrends() {
@@ -123,60 +116,12 @@ async function loadRankTrends() {
         : ''
 }
 
-async function loadSocialFunnel() {
-  const data = await getSocialFunnel(periodDays.value)
-  const hasData = data.total_posts > 0 || data.posted_posts > 0 || data.total_clicks > 0
-  if (!hasData) {
-    funnelChart?.setOption({
-      title: {
-        text: '暂无数据',
-        subtext: '在「社交分发」创建发帖任务后显示漏斗',
-        left: 'center',
-        top: 'center',
-        textStyle: { color: '#909399', fontSize: 14, fontWeight: 'normal' },
-        subtextStyle: { color: '#C0C4CC', fontSize: 12 },
-      },
-      series: [],
-    }, true)
-    return
-  }
-
-  const funnelData = [
-    { value: data.total_posts, name: '创建任务' },
-    { value: data.posted_posts, name: '成功发帖' },
-    { value: data.total_clicks, name: '引流点击' },
-  ]
-
-  funnelChart?.setOption({
-    tooltip: { trigger: 'item', formatter: '{b}: {c}' },
-    series: [{
-      type: 'funnel',
-      left: '10%',
-      top: 20,
-      bottom: 20,
-      width: '80%',
-      min: 0,
-      max: data.total_posts > 0 ? data.total_posts : 1,
-      minSize: '0%',
-      maxSize: '100%',
-      sort: 'descending',
-      gap: 2,
-      label: { show: true, position: 'inside' },
-      itemStyle: { borderColor: '#fff', borderWidth: 1 },
-      emphasis: { label: { fontSize: 14 } },
-      data: funnelData,
-    }],
-  }, true)
-}
-
 function handleResize() {
   rankChart?.resize()
-  funnelChart?.resize()
 }
 
 onMounted(() => {
   rankChart = echarts.init(rankChartRef.value!)
-  funnelChart = echarts.init(funnelChartRef.value!)
   window.addEventListener('resize', handleResize)
   loadAll()
 })
@@ -184,6 +129,14 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   rankChart?.dispose()
-  funnelChart?.dispose()
 })
 </script>
+
+<style scoped>
+.sample-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.5;
+}
+</style>

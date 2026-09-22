@@ -13,7 +13,12 @@ router = APIRouter()
 
 @router.post("/register", response_model=UserPublic)
 def register(payload: UserCreate, db: Session = Depends(get_db)) -> UserPublic:
-    """注册新用户"""
+    """注册新用户（默认关闭，生产须显式 ALLOW_REGISTRATION=true）。"""
+    if not settings.ALLOW_REGISTRATION:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="当前环境未开放注册",
+        )
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
         raise HTTPException(
