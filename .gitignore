@@ -14,3 +14,6 @@ venv/
 htmlcov/
 docs/
 优化建议/
+docker-compose.yml
+docker-compose.override.yml
+docker-compose.prod.yml
