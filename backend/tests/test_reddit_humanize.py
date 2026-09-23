@@ -49,3 +49,8 @@ def test_typo_pairs_differ_by_account_seed():
     assert len(a) == 4
     assert len(b) == 4
     assert a != b
+
+
+def test_typo_pairs_none_seed_is_stable():
+    assert typo_pairs_for_seed(None) == typo_pairs_for_seed(0)
+    assert typo_pairs_for_seed(None) == typo_pairs_for_seed(None)

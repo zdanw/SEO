@@ -258,6 +258,21 @@ def test_rank_by_opportunity_prefers_questions_and_low_replies():
     assert opportunity_score(items[1], now=now) > opportunity_score(items[0], now=now)
 
 
+def test_opportunity_score_penalizes_hot_threads():
+    now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+    hot = {
+        "title": "help with night wakes?",
+        "created_utc": int(now.timestamp()) - 600,
+        "num_comments": 200,
+    }
+    quiet = {
+        "title": "help with night wakes?",
+        "created_utc": int(now.timestamp()) - 600,
+        "num_comments": 2,
+    }
+    assert opportunity_score(quiet, now=now) > opportunity_score(hot, now=now) + 4
+
+
 def test_run_smart_discover_promo_skips_when_no_product_terms():
     calls: list[tuple[str, str]] = []
 

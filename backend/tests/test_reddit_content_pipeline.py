@@ -1,8 +1,9 @@
-"""评论流水线：检测诊断驱动重写、mixed 风险、humanize 后再检测。"""
+"""评论流水线：检测诊断驱动重写、mixed 风险、品牌闸、多轮分数。"""
 from decimal import Decimal
 
 from app.services.ai_detector import AiDetectionResult
 from app.services.reddit_content import (
+    build_brand_revision_notes,
     build_revision_notes,
     generate_comment_pipeline,
 )
@@ -68,6 +69,7 @@ def test_pipeline_passes_revision_notes_on_rewrite(monkeypatch):
         "app.services.reddit_content.humanize_comment",
         lambda text, **kw: text,
     )
+    monkeypatch.setattr("app.services.reddit_content.record_detection_patterns", lambda *a, **k: None)
 
     out = generate_comment_pipeline(
         ai,  # type: ignore[arg-type]
@@ -76,6 +78,7 @@ def test_pipeline_passes_revision_notes_on_rewrite(monkeypatch):
         subreddit="Parenting",
         intent="casual",
         seed=1,
+        site_id=1,
     )
     assert len(ai.calls) == 2
     assert ai.calls[0].get("revision_notes") in (None, "")
@@ -85,6 +88,7 @@ def test_pipeline_passes_revision_notes_on_rewrite(monkeypatch):
     assert out.rewrite_count == 1
     assert out.ai_score_before_humanize is not None
     assert out.ai_score_after_humanize is not None
+    assert len(out.score_rounds) == 2
 
 
 def test_pipeline_preserves_mixed_risk(monkeypatch):
@@ -99,6 +103,7 @@ def test_pipeline_preserves_mixed_risk(monkeypatch):
         "app.services.reddit_content.humanize_comment",
         lambda text, **kw: text,
     )
+    monkeypatch.setattr("app.services.reddit_content.record_detection_patterns", lambda *a, **k: None)
 
     out = generate_comment_pipeline(
         ai,  # type: ignore[arg-type]
@@ -106,9 +111,38 @@ def test_pipeline_preserves_mixed_risk(monkeypatch):
         post_body="Hello",
         subreddit="Parenting",
         intent="casual",
+        site_id=1,
     )
     assert out.ai_risk == "mixed"
     assert out.rewrite_count == 0
+
+
+def test_brand_gate_sets_notes_and_brand_leak_risk(monkeypatch):
+    ai = _FakeAI()
+    ai._bodies = [
+        "We love Bebcare at night honestly.",
+        "Bebcare saved our sleep schedule.",
+    ]
+
+    monkeypatch.setattr(
+        "app.services.reddit_content.detect_ai_content",
+        lambda *_: (_ for _ in ()).throw(AssertionError("should not detect on brand leak")),
+    )
+
+    out = generate_comment_pipeline(
+        ai,  # type: ignore[arg-type]
+        post_title="Hi",
+        post_body="Hello",
+        subreddit="Parenting",
+        intent="casual",
+        product_brief={"brand": "Bebcare"},
+        site_id=1,
+    )
+    assert out.ai_risk == "brand_leak"
+    assert len(ai.calls) == 2
+    assert "Bebcare" in (ai.calls[1].get("revision_notes") or "")
+    assert "ZERO brand" in (ai.calls[1].get("revision_notes") or "")
+    assert build_brand_revision_notes(["Bebcare"]).startswith("Your previous")
 
 
 def test_generate_comment_prompt_includes_revision(monkeypatch):

@@ -155,6 +155,9 @@ def _norm_text(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
+DEDUP_STATUSES = frozenset({"posted", "posting"})
+
+
 def find_similar_on_site(
     db: Session,
     *,
@@ -164,7 +167,7 @@ def find_similar_on_site(
     exclude_id: int | None = None,
     kind_label: str = "内容",
 ) -> str | None:
-    """站点级查重（矩阵号互相撞车也会拦）。过短正文跳过；最多比近 N 条。"""
+    """站点级查重（矩阵号互相撞车也会拦）。仅已发布；按 published_at；最多比近 N 条。"""
     norm = _norm_text(body)
     if len(norm) < 40:
         return None
@@ -173,10 +176,12 @@ def find_similar_on_site(
         db.query(model)
         .filter(
             model.site_id == site_id,
-            model.created_at >= week_ago,
+            model.status.in_(list(DEDUP_STATUSES)),
+            model.published_at.isnot(None),
+            model.published_at >= week_ago,
             model.id != (exclude_id or 0),
         )
-        .order_by(model.id.desc())
+        .order_by(model.published_at.desc())
         .limit(DEDUP_COMPARE_LIMIT)
         .all()
     )

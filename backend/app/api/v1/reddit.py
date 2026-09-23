@@ -664,6 +664,7 @@ def generate_post(
             ),
             avoid_titles=recent_titles,
             community_examples=community_examples,
+            site_id=ctx.site.id,
         )
     except DeepSeekError as exc:
         raise HTTPException(status_code=502, detail=f"AI 服务不可用：{exc}") from exc
@@ -922,6 +923,7 @@ def _generate_comment_for_url(
             ),
             seed=account.id + len(title),
             community_examples=community_examples,
+            site_id=ctx.site.id,
         )
         comment_body = generated.body
         ai_risk = generated.ai_risk

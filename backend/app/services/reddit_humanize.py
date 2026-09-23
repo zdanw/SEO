@@ -70,9 +70,9 @@ _EM_DASH_SPACED_RE = re.compile(r"\s*[—–]+\s*")
 
 
 def typo_pairs_for_seed(seed: int | None, *, count: int = ACCOUNT_TYPO_COUNT) -> tuple[tuple[str, str], ...]:
-    """按账号/种子从总词表抽固定子集，各号错误风格不同。"""
+    """按账号/种子从总词表抽固定子集；seed=None 时用 0，保证可复现。"""
     pairs = list(_TYPO_PAIRS)
-    rng = random.Random(seed)
+    rng = random.Random(0 if seed is None else seed)
     rng.shuffle(pairs)
     return tuple(pairs[: max(1, min(count, len(pairs)))])
 

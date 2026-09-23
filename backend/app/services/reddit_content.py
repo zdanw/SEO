@@ -1,7 +1,8 @@
 """评论生成流水线：AI 写稿 → 真人化 → AI 检测（失败则带诊断重写）。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 
 from app.services.ai_detector import AiDetectionResult, detect_ai_content
 from app.services.ai_writer import DeepSeekClient
@@ -9,14 +10,17 @@ from app.services.reddit_humanize import humanize_comment
 from app.services.reddit_mix import casual_mentions_brand
 from app.services.reddit_style import record_detection_patterns
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class GeneratedComment:
     body: str
-    ai_risk: str  # ok | mixed | likely_ai
+    ai_risk: str  # ok | mixed | likely_ai | brand_leak
     rewrite_count: int = 0
     ai_score_before_humanize: float | None = None
     ai_score_after_humanize: float | None = None
+    score_rounds: list[tuple[float, float]] = field(default_factory=list)
 
 
 def build_revision_notes(detection: AiDetectionResult) -> str:
@@ -53,6 +57,15 @@ def build_revision_notes(detection: AiDetectionResult) -> str:
     return "\n".join(parts)
 
 
+def build_brand_revision_notes(brands: list[str]) -> str:
+    names = ", ".join(b for b in brands if b) or "brand/product names"
+    return (
+        f"Your previous draft mentioned brand/product names ({names}). "
+        "This must be a casual community reply: rewrite with ZERO brand, product, "
+        "company, or website names."
+    )
+
+
 def _verdict_to_risk(verdict: str) -> str:
     if verdict == "likely_ai":
         return "likely_ai"
@@ -74,6 +87,7 @@ def generate_comment_pipeline(
     community_rules: str | None = None,
     seed: int | None = None,
     community_examples: list[dict[str, str]] | None = None,
+    site_id: int | None = None,
 ) -> GeneratedComment:
     brands = []
     if product_brief and product_brief.get("brand"):
@@ -88,6 +102,8 @@ def generate_comment_pipeline(
     revision_notes = ""
     score_before: float | None = None
     score_after: float | None = None
+    score_rounds: list[tuple[float, float]] = []
+    brand_hits = 0
 
     for attempt in range(2):
         body = ai.generate_reddit_comment(
@@ -101,28 +117,44 @@ def generate_comment_pipeline(
             community_rules=community_rules,
             revision_notes=revision_notes or None,
             community_examples=community_examples,
+            site_id=site_id,
         )
         rewrites = attempt
         if intent == "casual" and casual_mentions_brand(body, brands):
+            brand_hits += 1
+            revision_notes = build_brand_revision_notes(brands)
+            risk = "brand_leak"
             continue
 
         raw = body
         before = detect_ai_content(raw)
-        score_before = float(before.score)
+        before_score = float(before.score)
+        if score_before is None:
+            score_before = before_score
         if before.verdict in {"mixed", "likely_ai"}:
-            record_detection_patterns(before.signs_of_ai)
+            record_detection_patterns(before.signs_of_ai, site_id=site_id)
 
         body = humanize_comment(
             raw,
-            seed=None if seed is None else seed + attempt,
+            seed=(0 if seed is None else seed) + attempt,
             brand_names=tuple(brands),
             max_typos=max_typos,
         )
         after = detect_ai_content(body)
-        score_after = float(after.score)
+        after_score = float(after.score)
+        score_after = after_score
+        score_rounds.append((before_score, after_score))
+        if after_score > before_score + 1:
+            logger.warning(
+                "humanize raised AI score site=%s sub=%s: %.1f -> %.1f",
+                site_id,
+                subreddit,
+                before_score,
+                after_score,
+            )
         verdict = after.verdict
         if verdict in {"mixed", "likely_ai"}:
-            record_detection_patterns(after.signs_of_ai)
+            record_detection_patterns(after.signs_of_ai, site_id=site_id)
 
         if verdict != "likely_ai":
             risk = _verdict_to_risk(verdict)
@@ -130,7 +162,10 @@ def generate_comment_pipeline(
         risk = "likely_ai"
         revision_notes = build_revision_notes(after)
     else:
-        risk = "likely_ai"
+        if brand_hits >= 2 or (brand_hits and risk == "brand_leak" and not score_rounds):
+            risk = "brand_leak"
+        elif risk != "brand_leak":
+            risk = "likely_ai"
 
     return GeneratedComment(
         body=body,
@@ -138,4 +173,5 @@ def generate_comment_pipeline(
         rewrite_count=rewrites,
         ai_score_before_humanize=score_before,
         ai_score_after_humanize=score_after,
+        score_rounds=score_rounds,
     )

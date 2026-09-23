@@ -163,7 +163,7 @@ def relevance_score(item: dict, terms: list[str]) -> int:
 
 
 def opportunity_score(item: dict, *, now: datetime | None = None) -> float:
-    """问句 + 新鲜度 + 评论数少加分；评论很多则扣分。"""
+    """问句 + 新鲜度加分；评论很多的热帖强扣分，避免抢高楼。"""
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
@@ -176,12 +176,14 @@ def opportunity_score(item: dict, *, now: datetime | None = None) -> float:
         age_h = max(0.0, (now.timestamp() - created) / 3600.0)
         score += max(0.0, 3.0 - age_h / 12.0)
     n_comments = int(item.get("num_comments") or item.get("comment_count") or 0)
-    if n_comments < 5:
+    if n_comments >= 50:
+        score -= 6.0
+    elif n_comments >= 15:
+        score -= 3.0
+    elif n_comments < 5:
         score += 2.0
-    elif n_comments < 15:
-        score += 1.0
     else:
-        score -= 1.0
+        score += 1.0
     return score
 
 
@@ -190,13 +192,17 @@ def rank_by_opportunity(items: list[dict], *, now: datetime | None = None) -> li
 
 
 def prefer_product_relevant(items: list[dict], terms: list[str], *, now: datetime | None = None) -> list[dict]:
-    """只保留标题/正文命中产品词的帖；无命中则返回空（不强行用不相关帖）。"""
+    """只保留标题/正文命中产品词的帖；无命中则返回空。按机会分排序，相关度作次键。"""
     if not terms or not items:
         return list(items)
-    scored = [(relevance_score(i, terms), i) for i in items]
-    scored.sort(key=lambda x: (-x[0], 0))
-    matched = [i for score, i in scored if score > 0]
-    return rank_by_opportunity(matched, now=now) if matched else []
+    matched = [i for i in items if relevance_score(i, terms) > 0]
+    if not matched:
+        return []
+    return sorted(
+        matched,
+        key=lambda i: (opportunity_score(i, now=now), relevance_score(i, terms)),
+        reverse=True,
+    )
 
 
 def suggest_persona_subreddits(interests: list[str], *, ai=None, limit: int = 12) -> list[str]:

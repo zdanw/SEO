@@ -599,6 +599,7 @@ class DeepSeekClient:
         community_rules: str | None = None,
         avoid_titles: list[str] | None = None,
         community_examples: list[dict[str, str]] | None = None,
+        site_id: int | None = None,
         rng: random.Random | None = None,
     ) -> dict[str, str]:
         """Generate Reddit post; post_type=auto invents format for the sub."""
@@ -630,7 +631,7 @@ class DeepSeekClient:
         if rules_line:
             site_line = f"{site_line}\n{rules_line}"
         product_rule = _product_rule_line(allow_product=allow_product)
-        system_prompt = with_negative_examples(REDDIT_POST_SYSTEM_PROMPT)
+        system_prompt = with_negative_examples(REDDIT_POST_SYSTEM_PROMPT, site_id=site_id)
 
         templates = {
             "auto": REDDIT_AUTO_PROMPT,
@@ -711,6 +712,7 @@ class DeepSeekClient:
         community_rules: str | None = None,
         revision_notes: str | None = None,
         community_examples: list[dict[str, str]] | None = None,
+        site_id: int | None = None,
     ) -> str:
         """Generate a contextual Reddit comment (English)."""
         from app.services.reddit_community_verify import format_rules_prompt_line
@@ -764,7 +766,7 @@ class DeepSeekClient:
         return strip_em_dashes(
             self.chat(
                 prompt,
-                system_prompt=with_negative_examples(REDDIT_SYSTEM_PROMPT),
+                system_prompt=with_negative_examples(REDDIT_SYSTEM_PROMPT, site_id=site_id),
                 temperature=0.95,
                 max_tokens=180,
             )
