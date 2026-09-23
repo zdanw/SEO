@@ -86,26 +86,6 @@ CRITICAL coherence (must all be true):
 {keyword_line}
 """
 
-REDDIT_PITFALL_PROMPT = """Write a Reddit post for r/{subreddit} as a messy "I got burned / wasted money" story.
-
-Topic/keyword (the problem space, not an ad): {keyword}
-{site_line}
-{title_hint}
-{avoid_titles_line}
-""" + _COHERENCE_RULES + """
-Requirements:
-- English, first-person, frustrated + self-deprecating, like a real Reddit native of THIS sub
-- Title under 300 chars. Follow the assigned title style, but the concrete topic must still match the topic focus above (not a blank money rant).
-- Body: 120-220 words. Spend MOST of the post on bad prior options, wasted money, stress, dumb mistakes. Concrete details tied to the topic.
-- Your eventual solution (related to the topic) appears late and lightly — like an accidental find, not a recommendation essay.
-- Include one mild caveat about that solution (something still imperfect). NO hard sell, NO "highly recommend", NO affiliate energy.
-- NO numbered lists, NO bullets, NO TL;DR, NO section headers. Never use em dashes or en dashes.
-- End with a shrug or a question to the sub, not a CTA.
-
-Output JSON only:
-{{"title": "...", "body": "..."}}
-"""
-
 REDDIT_VENT_PROMPT = """Write a Reddit late-night vent / emotional support post for r/{subreddit}.
 
 Life pressure / emotional angle tied to: {keyword}
@@ -117,8 +97,8 @@ Requirements:
 - English, first-person, tired and human. Treehole / offmychest energy, fitting r/{subreddit} and the topic focus above.
 - Title under 300 chars. Follow the assigned title style. Do not always use "Burning out / how do you deal with...".
 - Body: 100-180 words about stress, guilt, exhaustion around the situation. Ask how others cope.
-- CRITICAL: Do NOT mention any brand, product, company, website, or shopping advice. Zero product talk.
-- NO lists, NO tips guide, NO "what worked for me" product story. Never use em dashes or en dashes.
+- {product_rule}
+- NO lists, NO tips guide. Never use em dashes or en dashes.
 - End by asking the community for emotional / practical coping ideas only.
 
 Output JSON only:
@@ -139,6 +119,7 @@ Requirements:
 - If you name a category or simple option related to the topic, keep it casual and non-promotional.
 - Stay away from politics, hate, or medical claims. NO lists, NO scorecards. Never use em dashes or en dashes.
 - End by asking people to disagree or share what they actually use.
+- {product_rule}
 
 Output JSON only:
 {{"title": "...", "body": "..."}}
@@ -158,6 +139,7 @@ Requirements:
 - If a keyword was given, put a related option around item 3 or 4 — one dry factual phrase, zero hype adjectives.
 - Prefer names over URLs. Do NOT add tracking params. If a site URL is provided, you may mention the name once without pushing a click.
 - Never use em dashes or en dashes. No "must buy" / "game changer" language.
+- {product_rule}
 
 Output JSON only:
 {{"title": "...", "body": "..."}}
@@ -174,9 +156,50 @@ Requirements:
 - English, first-person. Classic "looking for recommendations" Reddit native, NOT a stealth ad.
 - Title under 300 chars. Follow the assigned title style. Mix question forms; do not always start with "Anyone know...".
 - Body: 90-160 words with budget, constraints, and 2 failed options you already tried (why they failed). Ask for suggestions.
-- CRITICAL: Do NOT name or hint at your preferred brand/product as the answer. You are fishing for advice only.
-- NO affiliate tone, NO links. Never use em dashes or en dashes.
+- {product_rule}
+- NO affiliate tone. Never use em dashes or en dashes.
 - End by asking for lived experience from the sub.
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_AUTO_PROMPT = """Write ONE Reddit post that genuinely belongs in r/{subreddit}.
+
+Topic focus: {keyword}
+{site_line}
+{title_hint}
+{avoid_titles_line}
+""" + _COHERENCE_RULES + """
+Requirements:
+- English, first-person, like a regular member of THIS sub — not a brand account, not SEO copy.
+- Invent the format yourself based on what r/{subreddit} actually posts: story, vent, question, spicy take, tips dump, help request, or a mix. Do NOT force a template that would feel weird there.
+- Title under 300 chars. Use the assigned title vibe as a loose guide; paraphrase freely.
+- Body: 100-220 words. Short paragraphs. Concrete details. Match the community's tone (humor vs earnest vs practical).
+- {product_rule}
+- NO bullet lists unless the sub commonly uses them for resource dumps. No TL;DR, no FAQ layout, no "As an AI".
+- Never use em dashes or en dashes. End in a way that invites replies, not a sales CTA.
+
+Output JSON only:
+{{"title": "...", "body": "..."}}
+"""
+
+REDDIT_PITFALL_PROMPT = """Write a Reddit post for r/{subreddit} as a messy "I got burned / wasted money" story.
+
+Topic/keyword (the problem space, not an ad): {keyword}
+{site_line}
+{title_hint}
+{avoid_titles_line}
+""" + _COHERENCE_RULES + """
+Requirements:
+- English, first-person, frustrated + self-deprecating, like a real Reddit native of THIS sub
+- Title under 300 chars. Follow the assigned title style, but the concrete topic must still match the topic focus above (not a blank money rant).
+- Body: 120-220 words. Spend MOST of the post on bad prior options, wasted money, stress, dumb mistakes. Concrete details tied to the topic.
+- Your eventual solution (related to the topic) appears late and lightly — like an accidental find, not a recommendation essay.
+- Include one mild caveat about that solution (something still imperfect). NO hard sell, NO "highly recommend", NO affiliate energy.
+- NO numbered lists, NO bullets, NO TL;DR, NO section headers. Never use em dashes or en dashes.
+- End with a shrug or a question to the sub, not a CTA.
+- {product_rule}
 
 Output JSON only:
 {{"title": "...", "body": "..."}}
@@ -241,6 +264,16 @@ SOCIAL_PROMPT_TEMPLATE = """基于以下文章，为 {platform} 平台生成 1 �
 
 # 每种类型多组标题句式；生成时随机抽一组，降低撞模板概率
 REDDIT_TITLE_STYLES: dict[str, list[str]] = {
+    "auto": [
+        'Quiet exhaustion: "not dramatic, just tired of ___"',
+        'Soft dissent: "maybe we overcomplicate ___?"',
+        'Constraint-first: "need ___ that works in [tiny scenario]"',
+        'Notebook dump: "notes from a weekend rabbit hole on ___"',
+        'Confession beat: "I ignored the ___ warnings and paid for it"',
+        'Curiosity bait: "why does everyone in this sub swear by ___ differently?"',
+        'Specific ask: "has anyone actually lived with ___ for 6+ months?"',
+        'Shrug story: "___ went sideways and I still do not know what I learned"',
+    ],
     "pitfall": [
         'Warning tone: "PSA: avoid ___ until you read this" / "learned the hard way about ___"',
         'Money regret WITHOUT "I wasted $X": "___ sucked up way too much of my budget" / "refund denied, story inside"',
@@ -285,7 +318,7 @@ REDDIT_TITLE_STYLES: dict[str, list[str]] = {
 
 
 def pick_title_style_hint(post_type: str, *, rng: random.Random | None = None) -> str:
-    styles = REDDIT_TITLE_STYLES.get(post_type) or REDDIT_TITLE_STYLES["vent"]
+    styles = REDDIT_TITLE_STYLES.get(post_type) or REDDIT_TITLE_STYLES["auto"]
     picker = rng or random.Random()
     chosen = picker.choice(styles)
     # 再塞 1 条「不要用」的对照，强化去模板
@@ -295,6 +328,28 @@ def pick_title_style_hint(post_type: str, *, rng: random.Random | None = None) -
         f"Assigned title style for THIS draft (use this structure, paraphrase freely):\n- {chosen}\n"
         f"Do NOT reuse this alternate style: {avoid_example}"
     )
+
+
+def _product_rule_line(*, allow_product: bool) -> str:
+    if allow_product:
+        return (
+            "Product talk is ALLOWED lightly if a product brief is present: "
+            "at most one soft natural mention, no hard sell, no affiliate energy."
+        )
+    return (
+        "CRITICAL: Do NOT mention any brand, product, company, website, or shopping advice. "
+        "Zero product talk."
+    )
+
+
+def _site_line_for_post(*, allow_product: bool, site_url: str | None) -> str:
+    if not allow_product:
+        return "Do not include any links or product/brand names."
+    if site_url:
+        return (
+            f"Optional soft name-only mention related to this site (no tracking URL): {site_url}"
+        )
+    return "You may lightly mention the product/category from the brief if any; do not add tracking links."
 
 
 def format_avoid_titles_line(titles: list[str] | None) -> str:
@@ -366,6 +421,7 @@ Post body:
 {persona_line}
 {intent_line}
 {site_line}
+{rules_line}
 
 Write ONE short comment in English, 25-80 words:
 - Reply ONLY to this post. No unrelated product pitch.
@@ -373,6 +429,7 @@ Write ONE short comment in English, 25-80 words:
 - Contractions, fragments OK. Do not start with Yeah / Honestly / As someone
 - No lists, no "hope this helps", no essay structure, no marketing voice
 - Never use em dashes or en dashes
+- Obey the subreddit rules above when present
 
 Output the comment text only, no prefix or quotes.
 """
@@ -529,43 +586,44 @@ class DeepSeekClient:
         *,
         persona_prompt: str = "",
         product_brief: dict | None = None,
+        allow_product: bool = False,
+        community_rules: str | None = None,
         avoid_titles: list[str] | None = None,
         rng: random.Random | None = None,
     ) -> dict[str, str]:
-        """Generate Reddit native post types (English)."""
+        """Generate Reddit post; post_type=auto invents format for the sub."""
+        from app.services.reddit_community_verify import format_rules_prompt_line
+
         sr = subreddit.removeprefix("r/").strip()
         kw = (keyword or "").strip() or f"everyday life topics common in r/{sr}"
         topic_line = (
             f'Stay on keyword "{kw}". Do not switch to a different rabbit hole.'
             if (keyword or "").strip()
-            else f"No fixed keyword: invent a specific incident that fits r/{sr} and this post type."
+            else f"No fixed keyword: invent a specific incident that fits r/{sr}."
         )
         keyword_line = (
             "- Keyword tokens or clear synonyms must appear in title OR early body."
             if (keyword or "").strip()
             else "- Pick one concrete incident; keep title and body locked to that incident."
         )
-        brief = None if post_type in {"vent", "help_seek"} else product_brief
+        brief = product_brief if allow_product else None
         extra = _reddit_post_extra_lines(persona_prompt, brief)
         picker = rng or random.Random()
-
-        if post_type in {"vent", "help_seek"}:
-            site_line = "Do not include any links or product/brand names."
-        elif site_url and post_type in {"pitfall", "guide"}:
-            site_line = (
-                f"Optional soft name-only mention related to this site (no tracking URL): {site_url}"
-            )
-        else:
-            site_line = "Do not include any links."
+        rules_line = format_rules_prompt_line(community_rules)
+        site_line = _site_line_for_post(allow_product=allow_product, site_url=site_url) + extra
+        if rules_line:
+            site_line = f"{site_line}\n{rules_line}"
+        product_rule = _product_rule_line(allow_product=allow_product)
 
         templates = {
+            "auto": REDDIT_AUTO_PROMPT,
             "pitfall": REDDIT_PITFALL_PROMPT,
             "vent": REDDIT_VENT_PROMPT,
             "unpopular": REDDIT_UNPOPULAR_PROMPT,
             "guide": REDDIT_GUIDE_PROMPT,
             "help_seek": REDDIT_HELP_SEEK_PROMPT,
         }
-        template = templates.get(post_type) or REDDIT_VENT_PROMPT
+        template = templates.get(post_type) or REDDIT_AUTO_PROMPT
         avoid = list(avoid_titles or [])
         title_hint = pick_title_style_hint(post_type, rng=picker)
         avoid_line = format_avoid_titles_line(avoid)
@@ -574,11 +632,12 @@ class DeepSeekClient:
             prompt = template.format(
                 subreddit=sr,
                 keyword=kw,
-                site_line=site_line + extra,
+                site_line=site_line,
                 title_hint=title_hint,
                 avoid_titles_line=avoid_line,
                 topic_line=topic_line,
                 keyword_line=keyword_line,
+                product_rule=product_rule,
             )
             temp = 0.92 + picker.random() * 0.08
             raw = self.chat(
@@ -631,8 +690,11 @@ class DeepSeekClient:
         intent: str = "casual",
         persona_prompt: str = "",
         product_brief: dict | None = None,
+        community_rules: str | None = None,
     ) -> str:
         """Generate a contextual Reddit comment (English)."""
+        from app.services.reddit_community_verify import format_rules_prompt_line
+
         sr = subreddit.removeprefix("r/").strip()
         persona_line = f"Persona: {persona_prompt}" if persona_prompt else ""
         if intent == "promo" and product_brief:
@@ -660,6 +722,7 @@ class DeepSeekClient:
                 "or website. Must not mention marketing talking points."
             )
             site_line = "Do not include links."
+        rules_line = format_rules_prompt_line(community_rules)
         prompt = REDDIT_COMMENT_PROMPT.format(
             subreddit=sr,
             post_title=post_title[:500] or "(untitled)",
@@ -667,6 +730,7 @@ class DeepSeekClient:
             persona_line=persona_line,
             intent_line=intent_line,
             site_line=site_line,
+            rules_line=rules_line,
         )
         return strip_em_dashes(
             self.chat(

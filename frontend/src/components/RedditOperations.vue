@@ -65,8 +65,11 @@
         <el-row :gutter="16">
           <el-col :span="10">
             <el-form label-position="top">
-              <el-form-item label="帖子类型">
+              <el-form-item label="写法">
                 <el-radio-group v-model="postForm.post_type" class="post-type-radios">
+                  <el-radio value="auto">
+                    <span class="post-type-label">自主发挥</span>
+                  </el-radio>
                   <el-radio v-for="opt in postTypeOptions" :key="opt.value" :value="opt.value">
                     <span class="post-type-label">
                       {{ opt.label }}
@@ -87,7 +90,7 @@
                     </span>
                   </el-radio>
                 </el-radio-group>
-                <p class="muted" style="margin: 6px 0 0">偏 Reddit 原生语气；树洞/求助主帖不提产品。点类型旁 ? 看说明与例子。</p>
+                <p class="muted" style="margin: 6px 0 0">默认由 LLM 按社区自选体裁；选手动类型仅作提示。产品是否提及由下方开关控制。</p>
               </el-form-item>
               <el-form-item label="目标社区">
                 <el-select
@@ -115,12 +118,25 @@
                     />
                   </el-option-group>
                 </el-select>
+                <div v-if="postForm.subreddit" class="rules-preview muted" style="margin-top: 8px">
+                  <template v-if="rulesSummaryFor(postForm.subreddit)">
+                    <strong>版规摘要：</strong>{{ rulesSummaryFor(postForm.subreddit) }}
+                    <el-button link type="primary" size="small" @click="openRulesDialog(postForm.subreddit)">查看全文</el-button>
+                  </template>
+                  <template v-else>
+                    尚未拉取官方版规，可到「社区库」刷新。
+                  </template>
+                </div>
                 <p class="muted" style="margin: 6px 0 0">
                   与评论同一 90/10 原则：生成不拦；发布时选产品社区或带站点链接会计入产品配额。
                   <span v-if="overview">近 7 天产品占比 {{ mixPromoPercent }}%</span>
                 </p>
               </el-form-item>
-              <el-form-item label="产品（可选）">
+              <el-form-item label="允许提及产品">
+                <el-switch v-model="postForm.allow_product" />
+                <p class="muted" style="margin: 6px 0 0">关闭=纯闲聊；开启后需选产品，并计入产品配额。</p>
+              </el-form-item>
+              <el-form-item v-if="postForm.allow_product" label="产品">
                 <el-row :gutter="8" style="width: 100%">
                   <el-col :span="12">
                     <el-select
@@ -150,12 +166,12 @@
                   </el-col>
                 </el-row>
                 <p class="muted" style="margin: 6px 0 0">
-                  选产品后从产品关键词中随机抽一词生成；不选则按帖子类型与社区自由发挥。
+                  选产品后从产品关键词中随机抽一词生成。
                 </p>
               </el-form-item>
-              <el-form-item v-if="postForm.post_type === 'pitfall' || postForm.post_type === 'guide'" label="带入站点链接">
+              <el-form-item v-if="postForm.allow_product" label="带入站点链接">
                 <el-switch v-model="postForm.include_site_url" />
-                <span class="muted" style="margin-left: 8px">仅踩坑/干货可选；建议仅软提名称</span>
+                <span class="muted" style="margin-left: 8px">建议仅软提名称</span>
               </el-form-item>
               <el-button type="primary" :loading="postGenerating" :disabled="!selectedAccountId" @click="handleGeneratePost">
                 AI 生成并入审核队列
@@ -273,6 +289,22 @@
                     />
                   </el-option-group>
                 </el-select>
+                <div
+                  v-if="smartDiscoverSubreddits.length === 1"
+                  class="rules-preview muted"
+                  style="margin-top: 8px"
+                >
+                  <template v-if="rulesSummaryFor(smartDiscoverSubreddits[0])">
+                    <strong>版规摘要：</strong>{{ rulesSummaryFor(smartDiscoverSubreddits[0]) }}
+                    <el-button link type="primary" size="small" @click="openRulesDialog(smartDiscoverSubreddits[0])">查看全文</el-button>
+                  </template>
+                  <template v-else>
+                    尚未拉取官方版规，可到「社区库」刷新。
+                  </template>
+                </div>
+                <p v-else-if="smartDiscoverSubreddits.length > 1" class="muted" style="margin-top: 6px">
+                  已选 {{ smartDiscoverSubreddits.length }} 个社区；生成时会分别遵守各自版规。可在社区库查看全文。
+                </p>
               </el-form-item>
               <el-row :gutter="12">
                 <el-col :span="12">
@@ -610,7 +642,16 @@
               <el-tag size="small" :type="row.category === 'core' ? 'primary' : 'info'">{{ row.category === 'core' ? '核心' : '长尾' }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="rules_note" label="版规备忘" min-width="180" show-overflow-tooltip />
+          <el-table-column label="官方版规" min-width="200">
+            <template #default="{ row }">
+              <template v-if="row.rules_text">
+                <span class="rules-cell">{{ rulesPreviewText(row.rules_text) }}</span>
+                <el-button link type="primary" size="small" @click="openRulesDialog(row.name)">全文</el-button>
+              </template>
+              <span v-else class="muted">未拉取</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="rules_note" label="版规备忘" min-width="140" show-overflow-tooltip />
           <el-table-column label="外链" width="70">
             <template #default="{ row }">
               <el-tag size="small" :type="row.allows_links ? 'success' : 'danger'">{{ row.allows_links ? '允许' : '禁链' }}</el-tag>
@@ -624,8 +665,9 @@
             <template #default="{ row }">{{ row.best_hour_utc === null || row.best_hour_utc === undefined ? '—' : `${row.best_hour_utc}:00` }}</template>
           </el-table-column>
           <el-table-column prop="priority" label="优先级" width="70" />
-          <el-table-column label="操作" width="120" fixed="right">
+          <el-table-column label="操作" width="220" fixed="right">
             <template #default="{ row }">
+              <el-button size="small" :loading="refreshingRulesId === row.id" @click="refreshRules(row)">刷新版规</el-button>
               <el-button size="small" @click="openCommunityEdit(row)">编辑</el-button>
               <el-button size="small" type="danger" @click="removeCommunity(row)">删除</el-button>
             </template>
@@ -633,6 +675,13 @@
         </el-table>
       </el-tab-pane>
     </el-tabs>
+
+    <el-dialog v-model="rulesDialogVisible" :title="rulesDialogTitle" width="640px">
+      <pre class="rules-full">{{ rulesDialogBody || '暂无版规' }}</pre>
+      <template #footer>
+        <el-button @click="rulesDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 编辑帖子弹窗 -->
     <el-dialog v-model="postEditDialog" title="编辑 Reddit 帖子" width="640px">
@@ -817,7 +866,7 @@ import {
   updateRedditComment, approveRedditComment, publishRedditComment, forceFailRedditComment, deleteRedditComment,
   searchRedditPosts,
   getRedditOverview, listAccountProfiles, updateAccountProfile,
-  listCommunities, createCommunity, updateCommunity, deleteCommunity,
+  listCommunities, createCommunity, updateCommunity, deleteCommunity, refreshCommunityRules,
   scheduleRedditPost, cancelRedditPostSchedule, syncPostMetrics,
   rejectRedditPost, rejectRedditComment, scheduleRedditComment, cancelRedditCommentSchedule,
   suggestPersonaCommunities, listBrands, smartDiscoverReddit,
@@ -828,6 +877,7 @@ import {
   type RedditBrand, type RedditBrandProduct,
   type RedditEngageComment,
 } from '@/api/reddit'
+import { useSiteReload } from '@/composables/useSiteReload'
 
 const route = useRoute()
 const status = ref<RedditStatus | null>(null)
@@ -989,6 +1039,53 @@ const profileForm = reactive({
 // ===== 社区库 =====
 const communities = ref<RedditCommunity[]>([])
 const communitiesLoading = ref(false)
+const refreshingRulesId = ref<number | null>(null)
+const rulesDialogVisible = ref(false)
+const rulesDialogTitle = ref('')
+const rulesDialogBody = ref('')
+
+function findCommunityByName(name: string) {
+  const key = name.replace(/^r\//i, '').toLowerCase()
+  return communities.value.find((c) => c.name.toLowerCase() === key) || null
+}
+
+function rulesPreviewText(text: string, max = 80) {
+  const one = text.replace(/\s+/g, ' ').trim()
+  return one.length > max ? `${one.slice(0, max)}…` : one
+}
+
+function rulesSummaryFor(name: string) {
+  const row = findCommunityByName(name)
+  if (!row?.rules_text) return ''
+  return rulesPreviewText(row.rules_text, 120)
+}
+
+function openRulesDialog(name: string) {
+  const row = findCommunityByName(name)
+  rulesDialogTitle.value = `r/${name.replace(/^r\//i, '')} 官方版规`
+  rulesDialogBody.value = row?.rules_text || ''
+  rulesDialogVisible.value = true
+}
+
+async function refreshRules(row: RedditCommunity) {
+  refreshingRulesId.value = row.id
+  try {
+    await refreshCommunityRules(row.id)
+    ElMessage.success(`已刷新 r/${row.name} 版规`)
+    await loadCommunities()
+  } catch (e: any) {
+    const status = e?.response?.status
+    const detail = e?.response?.data?.detail || e?.message || '刷新失败'
+    if (status === 429) {
+      ElMessage.warning(typeof detail === 'string' ? detail : 'Reddit 接口限流，请稍后再试')
+    } else {
+      ElMessage.error(typeof detail === 'string' ? detail : '刷新失败')
+    }
+    await loadCommunities()
+  } finally {
+    refreshingRulesId.value = null
+  }
+}
 const communityDialog = ref(false)
 const communitySaving = ref(false)
 const weekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
@@ -1004,8 +1101,8 @@ const scheduleTime = ref('')
 let scheduleTargetPost: RedditPost | null = null
 let scheduleTargetComment: RedditComment | null = null
 
-const postForm = reactive<{ post_type: PostType; subreddit: string; include_site_url: boolean }>({
-  post_type: 'pitfall', subreddit: '', include_site_url: false,
+const postForm = reactive<{ post_type: PostType; subreddit: string; allow_product: boolean; include_site_url: boolean }>({
+  post_type: 'auto', subreddit: '', allow_product: false, include_site_url: false,
 })
 const postBrandId = ref<number | null>(null)
 const postProductId = ref<number | null>(null)
@@ -1041,7 +1138,7 @@ const postTypeOptions: {
     desc: '谈压力、焦虑、生活状态等情绪问题，拉近距离。像真实有烦恼的人，而不是品牌号。',
     exampleTitle: 'Burning out — how do you even deal with XXX?',
     exampleTip: '只倾诉和提问；产品留给评论区再用养号号轻提。',
-    productNote: '主帖禁止提任何品牌/产品/链接。',
+    productNote: '是否提产品由「允许提及产品」开关控制。',
   },
   {
     value: 'unpopular',
@@ -1063,7 +1160,7 @@ const postTypeOptions: {
     desc: '用极细分场景求推荐，利用“好为人师”。主帖只描述需求和失败尝试，不自答产品。',
     exampleTitle: 'Anyone know an XXX that works for [very specific scenario]?',
     exampleTip: '写清预算/限制，并说明试过 A/B 为何不行；产品可留给评论区或小号互动。',
-    productNote: '主帖禁止点名自家产品。',
+    productNote: '是否提产品由「允许提及产品」开关控制。',
   },
 ]
 const posts = ref<RedditPost[]>([])
@@ -1097,10 +1194,20 @@ onMounted(async () => {
   if (['posts', 'comments', 'accounts', 'communities'].includes(tab)) {
     innerTab.value = tab
   }
+  await reloadAll()
+})
+
+async function reloadAll() {
+  selectedAccountId.value = null
+  engagePosts.value = []
+  searchResults.value = []
+  selectedSearchPosts.value = []
   await Promise.all([loadStatus(), loadOverview(), loadCommunities(), loadBrands()])
   await Promise.all([loadPosts(), loadComments()])
   if (innerTab.value === 'accounts') loadProfiles()
-})
+}
+
+useSiteReload(reloadAll)
 
 watch(selectedAccountId, () => {
   loadPosts()
@@ -1132,15 +1239,11 @@ async function loadPosts() {
 async function handleGeneratePost() {
   if (!selectedAccountId.value) { ElMessage.warning('请选择 Reddit 账号'); return }
   if (!postForm.subreddit) { ElMessage.warning('请选择或填写目标社区（优先人设社区）'); return }
-  if (postProductId.value && !postBrandId.value) {
-    ElMessage.warning('请选择品牌')
-    return
-  }
-  if (postBrandId.value && !postProductId.value) {
-    ElMessage.warning('请选择产品，或不选品牌')
-    return
-  }
-  if (postProductId.value) {
+  if (postForm.allow_product) {
+    if (!postBrandId.value || !postProductId.value) {
+      ElMessage.warning('开启「允许提及产品」时请选择品牌和产品')
+      return
+    }
     const product = productsOfPostBrand.value.find((p) => p.id === postProductId.value)
     if (!product || !(product.keywords || []).length) {
       ElMessage.warning('该产品尚未绑定关键词，请先在品牌/产品库中填写')
@@ -1152,7 +1255,7 @@ async function handleGeneratePost() {
   if (memeSubs.has(sr)) {
     try {
       await ElMessageBox.confirm(
-        `r/${sr} 偏梗图/沙雕，不太适合长文踩坑/干货。确定仍要生成吗？更建议换到与产品相关的人设或产品社区。`,
+        `r/${sr} 偏梗图/沙雕，自主发挥也可能不搭。确定仍要生成吗？更建议换到与人设或产品相关的社区。`,
         '版块可能不匹配',
         { type: 'warning', confirmButtonText: '仍要生成', cancelButtonText: '换社区' },
       )
@@ -1166,9 +1269,10 @@ async function handleGeneratePost() {
       account_id: selectedAccountId.value,
       post_type: postForm.post_type,
       subreddit: postForm.subreddit,
-      brand_id: postBrandId.value || undefined,
-      product_id: postProductId.value || undefined,
-      include_site_url: postForm.include_site_url,
+      brand_id: postForm.allow_product ? (postBrandId.value || undefined) : undefined,
+      product_id: postForm.allow_product ? (postProductId.value || undefined) : undefined,
+      allow_product: postForm.allow_product,
+      include_site_url: postForm.allow_product && postForm.include_site_url,
     })
     ElMessage.success('已生成，请在审核队列中编辑/批准')
     loadPosts()
@@ -1439,6 +1543,7 @@ function statusTag(s: string): any {
 }
 function postTypeLabel(t: string) {
   return {
+    auto: '自主',
     pitfall: '踩坑',
     vent: '树洞',
     unpopular: '暴论',
@@ -1733,6 +1838,17 @@ function onTabChange(name: string | number) {
 .stat-label { font-size: 12px; color: #909399; }
 .stat-danger { color: #f56c6c; }
 .muted { color: #909399; }
+.rules-cell { display: inline; margin-right: 4px; }
+.rules-full {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+}
 .post-type-radios {
   display: flex;
   flex-wrap: wrap;

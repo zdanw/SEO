@@ -92,6 +92,12 @@ class Settings(BaseSettings):
     ZERNIO_API_BASE: str = "https://zernio.com/api/v1"
     ZERNIO_TIMEOUT: int = 30
 
+    # Reddit 官方只读 API（拉版规等；未登录 .json 已 403，需 script/web app 凭证）
+    # 在 https://www.reddit.com/prefs/apps 创建 type=script 应用
+    REDDIT_CLIENT_ID: Optional[str] = None
+    REDDIT_CLIENT_SECRET: Optional[str] = None
+    REDDIT_USER_AGENT: str = "web:seo-ops:1.0.0 (by /u/seo_ops_local)"
+
     @property
     def is_dev(self) -> bool:
         return self.APP_ENV.lower() in ("dev", "development", "local")

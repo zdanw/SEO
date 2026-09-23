@@ -58,6 +58,26 @@ def test_parse_429_retry_from_message():
     assert "rate_limited" in msg
 
 
+def test_classify_429_quota_vs_rate_limit():
+    from app.services.zernio_client import _classify_429
+
+    assert (
+        _classify_429(
+            "Zernio 429 (rate_limited): Retry in 202s",
+            '{"error":"Reddit rate limit reached. Retry in 202s.","code":"rate_limited"}',
+        )
+        == "rate_limited"
+    )
+    assert (
+        _classify_429(
+            "Zernio 429: Quota resets in 3600s",
+            '{"error":"Daily quota exceeded. Quota resets in 3600s."}',
+        )
+        == "quota_exhausted"
+    )
+    assert _classify_429("Zernio 429: too many requests", "") == "unknown_429"
+
+
 def test_map_search_items_normalizes_permalink():
     items = ZernioClient._map_search_items(
         [{

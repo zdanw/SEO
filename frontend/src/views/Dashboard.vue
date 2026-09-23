@@ -49,6 +49,7 @@ import {
 } from '@/api/dashboard'
 import { listKeywords } from '@/api/keywords'
 import { applyRankTrendChart, formatKeywordTrendLabel } from '@/utils/rankTrendChart'
+import { useSiteReload } from '@/composables/useSiteReload'
 
 const periodDays = ref(7)
 const loading = ref(false)
@@ -125,6 +126,8 @@ onMounted(() => {
   window.addEventListener('resize', handleResize)
   loadAll()
 })
+
+useSiteReload(loadAll)
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)

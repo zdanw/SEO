@@ -26,6 +26,7 @@ def generate_comment_pipeline(
     persona_prompt: str = "",
     product_brief: dict | None = None,
     site_url: str | None = None,
+    community_rules: str | None = None,
     seed: int | None = None,
 ) -> GeneratedComment:
     brands = []
@@ -46,6 +47,7 @@ def generate_comment_pipeline(
             intent=intent,
             persona_prompt=persona_prompt,
             product_brief=brief_for_model,
+            community_rules=community_rules,
         )
         rewrites = attempt
         if intent == "casual" and casual_mentions_brand(body, brands):

@@ -124,6 +124,7 @@ import {
   type CostSnapshot,
   type TaskRunRow,
 } from '@/api/ops'
+import { useSiteReload } from '@/composables/useSiteReload'
 
 const loading = ref(false)
 const tasksLoading = ref(false)
@@ -186,6 +187,7 @@ async function refresh() {
 }
 
 onMounted(refresh)
+useSiteReload(refresh)
 </script>
 
 <style scoped lang="scss">

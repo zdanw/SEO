@@ -1,24 +1,49 @@
-"""Reddit 发帖类型：5 种原生帖型 + 标题多样性。"""
+"""Reddit 发帖类型：auto + 5 种可选提示 + 标题多样性。"""
 import random
 
-from app.schemas.reddit import POST_TYPES
+from app.schemas.reddit import MANUAL_POST_TYPES, POST_TYPES
 from app.services.ai_writer import (
     pick_title_style_hint,
     title_too_similar,
 )
+from app.services.reddit_mix import resolve_post_intent
 
 
-def test_post_types_are_native_five():
-    assert POST_TYPES == (
+def test_post_types_include_auto_and_manual_five():
+    assert POST_TYPES[0] == "auto"
+    assert MANUAL_POST_TYPES == (
         "pitfall",
         "vent",
         "unpopular",
         "guide",
         "help_seek",
     )
-    allowed: set[str] = set(POST_TYPES)
-    assert "consultation" not in allowed
-    assert "experience" not in allowed
+    assert set(POST_TYPES) == {"auto", *MANUAL_POST_TYPES}
+    assert "consultation" not in POST_TYPES
+
+
+def test_resolve_post_intent_follows_allow_product_switch():
+    assert (
+        resolve_post_intent(
+            post_type="auto",
+            community_purpose="promo",
+            allow_product=False,
+        )
+        == "casual"
+    )
+    assert (
+        resolve_post_intent(
+            post_type="vent",
+            community_purpose="persona",
+            allow_product=True,
+        )
+        == "promo"
+    )
+
+
+def test_resolve_post_intent_legacy_without_allow_product():
+    assert resolve_post_intent(post_type="vent", community_purpose="promo", include_site_url=True) == "casual"
+    assert resolve_post_intent(post_type="guide", community_purpose="promo") == "promo"
 
 
 def test_pick_title_style_hint_varies_with_seed():
@@ -26,7 +51,6 @@ def test_pick_title_style_hint_varies_with_seed():
     b = pick_title_style_hint("pitfall", rng=random.Random(2))
     assert "Assigned title style" in a
     assert "Do NOT reuse" in a
-    # 不同种子通常抽到不同句式（极小概率相同，再试一组）
     if a == b:
         c = pick_title_style_hint("pitfall", rng=random.Random(99))
         assert a != c or b != c
@@ -59,7 +83,7 @@ def test_post_topic_coherent_requires_shared_topic():
     )
 
 
-def test_generate_reddit_post_dispatches_prompts():
+def test_generate_reddit_post_auto_and_manual_prompts():
     from app.services import ai_writer
 
     captured: list[str] = []
@@ -80,6 +104,7 @@ def test_generate_reddit_post_dispatches_prompts():
             "Parenting",
             "baby monitor",
             None,
+            allow_product=False,
             avoid_titles=["I wasted $80 on router upgrade"],
             rng=random.Random(3),
         )
@@ -88,7 +113,20 @@ def test_generate_reddit_post_dispatches_prompts():
         blob = captured[0].lower()
         assert "assigned title style" in blob
         assert "do not closely copy" in blob or "i wasted $80" in blob
-        if pt == "vent":
-            assert "product" in blob and (
-                "do not mention" in blob or "never mention" in blob or "no product" in blob
-            )
+        assert "zero product talk" in blob or "do not mention any brand" in blob
+        if pt == "auto":
+            assert "invent the format" in blob
+
+    captured.clear()
+    client.generate_reddit_post(
+        "auto",
+        "Parenting",
+        "baby monitor",
+        "https://example.com",
+        allow_product=True,
+        product_brief={"brand": "Acme", "product": "Monitor X"},
+        rng=random.Random(1),
+    )
+    promo_blob = captured[0].lower()
+    assert "product talk is allowed" in promo_blob
+    assert "acme" in promo_blob

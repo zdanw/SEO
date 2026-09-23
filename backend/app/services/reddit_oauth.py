@@ -139,7 +139,7 @@ def upsert_from_zernio(
 def sync_zernio_accounts(
     db: Session, user_id: int, site_id: int
 ) -> tuple[list[SocialAccount], list[str]]:
-    clients = iter_sync_clients(db)
+    clients = iter_sync_clients(db, site_id)
     if not clients:
         raise ZernioError("请先在「社交账号」页面添加并启用 Zernio API Key")
 
@@ -197,7 +197,7 @@ def sync_zernio_accounts(
 
 def deactivate_orphan_reddit_accounts(db: Session, site_id: int) -> int:
     """停用未绑定启用中 Zernio Key 的 Reddit 账号（含历史 env 同步的空 key_id）。"""
-    enabled_ids = {k.id for k in list_enabled_keys(db)}
+    enabled_ids = {k.id for k in list_enabled_keys(db, site_id)}
     accounts = (
         db.query(SocialAccount)
         .filter(

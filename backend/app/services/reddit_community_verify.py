@@ -61,6 +61,10 @@ def _about_url(name: str) -> str:
     return f"https://www.reddit.com/r/{name}/about.json"
 
 
+def _rules_url(name: str) -> str:
+    return f"https://www.reddit.com/r/{name}/about/rules.json"
+
+
 def _new_url(name: str) -> str:
     return f"https://www.reddit.com/r/{name}/new.json?limit=25"
 
@@ -450,3 +454,330 @@ def verify_community_row(
     result = verify_subreddit(row.name, http_get=http_get, now=now)
     apply_verify_to_community(row, result)
     return result
+
+
+@dataclass
+class CommunityRulesResult:
+    name: str
+    rules_text: str | None
+    error: str | None = None
+    retry_after: int | None = None
+    rate_limited: bool = False
+
+
+RULES_CACHE_HOURS = 24
+RULES_PROMPT_MAX_CHARS = 2500
+_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
+_OAUTH_RULES_TMPL = "https://oauth.reddit.com/r/{name}/about/rules"
+
+_oauth_token_cache: dict[str, Any] = {"token": None, "expires_at": 0.0}
+
+
+def _reddit_user_agent() -> str:
+    try:
+        from app.core.config import settings
+
+        return (settings.REDDIT_USER_AGENT or _USER_AGENT).strip() or _USER_AGENT
+    except Exception:
+        return _USER_AGENT
+
+
+def reddit_app_credentials() -> tuple[str, str] | None:
+    try:
+        from app.core.config import settings
+
+        cid = (settings.REDDIT_CLIENT_ID or "").strip()
+        secret = (settings.REDDIT_CLIENT_SECRET or "").strip()
+        if cid and secret:
+            return cid, secret
+    except Exception:
+        pass
+    return None
+
+
+def get_reddit_app_access_token(*, force: bool = False) -> str | None:
+    """client_credentials 应用令牌；无凭证则返回 None。"""
+    import time
+
+    creds = reddit_app_credentials()
+    if not creds:
+        return None
+    now = time.time()
+    if (
+        not force
+        and _oauth_token_cache.get("token")
+        and float(_oauth_token_cache.get("expires_at") or 0) > now + 30
+    ):
+        return str(_oauth_token_cache["token"])
+    cid, secret = creds
+    with httpx.Client(timeout=_TIMEOUT_S, follow_redirects=True) as client:
+        resp = client.post(
+            _TOKEN_URL,
+            data={"grant_type": "client_credentials"},
+            auth=(cid, secret),
+            headers={"User-Agent": _reddit_user_agent()},
+        )
+    if resp.status_code >= 400:
+        return None
+    try:
+        data = resp.json()
+    except Exception:
+        return None
+    token = str(data.get("access_token") or "").strip()
+    if not token:
+        return None
+    expires_in = float(data.get("expires_in") or 3600)
+    _oauth_token_cache["token"] = token
+    _oauth_token_cache["expires_at"] = now + max(60.0, expires_in)
+    return token
+
+
+def _oauth_http_get(url: str, token: str) -> tuple[int, Any]:
+    with httpx.Client(
+        timeout=_TIMEOUT_S,
+        headers={
+            "User-Agent": _reddit_user_agent(),
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+        follow_redirects=True,
+    ) as client:
+        resp = client.get(url)
+        try:
+            body = resp.json()
+        except Exception:
+            body = {"raw": resp.text[:500]}
+        return resp.status_code, body
+
+
+def format_rules_from_payload(payload: Any) -> str:
+    """Normalize Reddit/Zernio rules payload into plain text."""
+    if not isinstance(payload, dict):
+        return ""
+    rules = payload.get("rules")
+    if not isinstance(rules, list):
+        return ""
+    lines: list[str] = []
+    for idx, rule in enumerate(rules, start=1):
+        if not isinstance(rule, dict):
+            continue
+        title = str(
+            rule.get("short_name")
+            or rule.get("shortName")
+            or rule.get("violation_reason")
+            or rule.get("violationReason")
+            or f"Rule {idx}"
+        ).strip()
+        desc = str(rule.get("description") or "").strip()
+        # strip simple HTML leftovers if any
+        desc = re.sub(r"<[^>]+>", " ", desc)
+        desc = re.sub(r"\s+", " ", desc).strip()
+        if title and desc:
+            lines.append(f"{idx}. {title}: {desc}")
+        elif title:
+            lines.append(f"{idx}. {title}")
+        elif desc:
+            lines.append(f"{idx}. {desc}")
+    site_rules = payload.get("siteRules") or payload.get("site_rules") or []
+    if isinstance(site_rules, list) and site_rules:
+        site_bits = [str(x).strip() for x in site_rules if str(x).strip()]
+        if site_bits:
+            lines.append("Site-wide: " + "; ".join(site_bits))
+    return "\n".join(lines).strip()
+
+
+def fetch_subreddit_rules_via_zernio(client: Any, name: str) -> CommunityRulesResult:
+    """通过已绑定的 Zernio Reddit 账号拉取版规（推荐路径）。"""
+    sr = normalize_subreddit(name)
+    try:
+        payload = client.get_subreddit_rules(sr)
+    except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        retry_after = getattr(exc, "retry_after", None)
+        detail = str(exc)
+        if retry_after is None:
+            m = re.search(r"(?:Quota resets|Retry) in (\d+)\s*s", detail, re.IGNORECASE)
+            if m:
+                retry_after = int(m.group(1))
+        if status == 429 or "rate limit" in detail.lower():
+            wait = f"约 {retry_after} 秒后" if retry_after else "稍后"
+            return CommunityRulesResult(
+                name=sr,
+                rules_text=None,
+                error=f"Reddit/Zernio 接口限流，请{wait}再刷新版规",
+                retry_after=retry_after,
+                rate_limited=True,
+            )
+        if status:
+            return CommunityRulesResult(
+                name=sr,
+                rules_text=None,
+                error=f"Zernio rules HTTP {status}: {detail}",
+                retry_after=retry_after,
+            )
+        return CommunityRulesResult(name=sr, rules_text=None, error=f"Zernio rules fetch failed: {detail}")
+    text = format_rules_from_payload(payload if isinstance(payload, dict) else {})
+    if not text:
+        return CommunityRulesResult(name=sr, rules_text=None, error="empty rules from Zernio")
+    return CommunityRulesResult(name=sr, rules_text=text)
+
+
+def _rules_error_for_status(status: int, *, used_oauth: bool) -> str:
+    if status == 403 and not used_oauth:
+        return (
+            "rules HTTP 403：Reddit 已关闭未登录 JSON 接口。"
+            "请在 backend/.env 配置 REDDIT_CLIENT_ID 与 REDDIT_CLIENT_SECRET"
+            "（https://www.reddit.com/prefs/apps 创建 script 应用）后重试"
+        )
+    if status == 403 and used_oauth:
+        return "rules HTTP 403：OAuth 被拒，请检查 REDDIT_CLIENT_ID/SECRET 与 User-Agent"
+    if status == 401:
+        return "rules HTTP 401：Reddit 应用凭证无效"
+    return f"rules HTTP {status}"
+
+
+def fetch_subreddit_rules(
+    name: str,
+    *,
+    http_get: HttpGet | None = None,
+) -> CommunityRulesResult:
+    """优先 OAuth 官方 API；测试可注入 http_get 走公开 URL。"""
+    sr = normalize_subreddit(name)
+    if http_get is not None:
+        try:
+            status, body = http_get(_rules_url(sr))
+        except Exception as exc:
+            return CommunityRulesResult(name=sr, rules_text=None, error=f"rules fetch failed: {exc}")
+        if status == 404:
+            return CommunityRulesResult(name=sr, rules_text=None, error="rules endpoint 404")
+        if status >= 400:
+            return CommunityRulesResult(
+                name=sr,
+                rules_text=None,
+                error=_rules_error_for_status(status, used_oauth=False),
+            )
+        text = format_rules_from_payload(body)
+        if not text:
+            return CommunityRulesResult(name=sr, rules_text=None, error="empty rules")
+        return CommunityRulesResult(name=sr, rules_text=text)
+
+    token = None
+    try:
+        token = get_reddit_app_access_token()
+    except Exception as exc:
+        return CommunityRulesResult(name=sr, rules_text=None, error=f"oauth token failed: {exc}")
+
+    if token:
+        try:
+            status, body = _oauth_http_get(_OAUTH_RULES_TMPL.format(name=sr), token)
+        except Exception as exc:
+            return CommunityRulesResult(name=sr, rules_text=None, error=f"rules oauth fetch failed: {exc}")
+        if status >= 400:
+            return CommunityRulesResult(
+                name=sr,
+                rules_text=None,
+                error=_rules_error_for_status(status, used_oauth=True),
+            )
+        text = format_rules_from_payload(body)
+        if not text:
+            return CommunityRulesResult(name=sr, rules_text=None, error="empty rules")
+        return CommunityRulesResult(name=sr, rules_text=text)
+
+    # 无凭证：再试公开 URL（多数环境已 403，用于兼容旧网络）
+    try:
+        status, body = _default_http_get(_rules_url(sr))
+    except Exception as exc:
+        return CommunityRulesResult(name=sr, rules_text=None, error=f"rules fetch failed: {exc}")
+    if status >= 400:
+        return CommunityRulesResult(
+            name=sr,
+            rules_text=None,
+            error=_rules_error_for_status(status, used_oauth=False),
+        )
+    text = format_rules_from_payload(body)
+    if not text:
+        return CommunityRulesResult(name=sr, rules_text=None, error="empty rules")
+    return CommunityRulesResult(name=sr, rules_text=text)
+
+
+def is_rules_fresh(row: Any, *, now: datetime | None = None) -> bool:
+    fetched = getattr(row, "rules_fetched_at", None)
+    if fetched is None or not getattr(row, "rules_text", None):
+        return False
+    now = now or datetime.now(timezone.utc)
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return fetched >= now - timedelta(hours=RULES_CACHE_HOURS)
+
+
+def apply_rules_to_community(row: Any, result: CommunityRulesResult) -> None:
+    if result.rules_text:
+        row.rules_text = result.rules_text
+        row.rules_fetched_at = datetime.now(timezone.utc)
+        # keep verify_error for existence; do not overwrite success with empty rules noise
+    elif result.error:
+        # only annotate if we have no rules yet
+        if not getattr(row, "rules_text", None):
+            prev = (getattr(row, "verify_error", None) or "").strip()
+            note = f"rules: {result.error}"
+            row.verify_error = f"{prev}; {note}".strip("; ") if prev else note
+
+
+def refresh_community_existence_and_rules(
+    row: Any,
+    *,
+    force: bool = True,
+    http_get: HttpGet | None = None,
+    now: datetime | None = None,
+    zernio_client: Any | None = None,
+    skip_public_verify: bool = False,
+) -> tuple[CommunityVerifyResult, CommunityRulesResult]:
+    """Refresh official rules (prefer Zernio). Public about.json is optional."""
+    now = now or datetime.now(timezone.utc)
+    if skip_public_verify or zernio_client is not None:
+        # 有 Zernio 时不必再打公开 about.json（多数环境 403，且浪费时机）
+        verify = CommunityVerifyResult(
+            name=row.name,
+            exists=True if getattr(row, "exists", None) is not False else False,
+            subscribers=getattr(row, "subscribers", None),
+            accounts_active=getattr(row, "accounts_active", None),
+            posts_7d=getattr(row, "posts_7d", None),
+            activity_score=getattr(row, "activity_score", None),
+            is_active_enough=bool(getattr(row, "is_active", True)),
+            error=None,
+        )
+        if verify.exists is False:
+            return verify, CommunityRulesResult(name=row.name, rules_text=None, error="subreddit missing")
+    else:
+        verify = verify_community_row(row, force=force, http_get=http_get, now=now)
+        if verify.exists is False:
+            return verify, CommunityRulesResult(name=row.name, rules_text=None, error="subreddit missing")
+    if not force and is_rules_fresh(row, now=now):
+        return verify, CommunityRulesResult(name=row.name, rules_text=row.rules_text)
+    if zernio_client is not None:
+        rules = fetch_subreddit_rules_via_zernio(zernio_client, row.name)
+    else:
+        rules = fetch_subreddit_rules(row.name, http_get=http_get)
+    apply_rules_to_community(row, rules)
+    return verify, rules
+
+
+def truncate_rules_for_prompt(rules_text: str | None, *, max_chars: int = RULES_PROMPT_MAX_CHARS) -> str:
+    text = (rules_text or "").strip()
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 20].rstrip() + "\n...[truncated]"
+
+
+def format_rules_prompt_line(rules_text: str | None) -> str:
+    clipped = truncate_rules_for_prompt(rules_text)
+    if not clipped:
+        return ""
+    return (
+        "Subreddit rules (must follow; if conflict with other instructions, these rules win):\n"
+        f"{clipped}"
+    )

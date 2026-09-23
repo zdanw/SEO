@@ -70,7 +70,11 @@ from app.services.reddit_client import (
 )
 from app.services.reddit_content import generate_comment_pipeline
 from app.services.reddit_community_verify import (
+    apply_rules_to_community,
     apply_verify_to_community,
+    fetch_subreddit_rules,
+    fetch_subreddit_rules_via_zernio,
+    refresh_community_existence_and_rules,
     verify_subreddit,
     verify_subreddits_with_feed_llm,
 )
@@ -116,13 +120,85 @@ def _mix_http(exc: MixQuotaExceeded) -> HTTPException:
 
 
 def _purpose_for_subreddit(db: Session, site_id: int, subreddit: str) -> str | None:
-    name = normalize_subreddit(subreddit)
-    row = (
-        db.query(RedditCommunity)
-        .filter(RedditCommunity.site_id == site_id, RedditCommunity.name == name)
-        .first()
-    )
+    row = _community_for_subreddit(db, site_id, subreddit)
     return row.purpose if row else None
+
+
+def _community_for_subreddit(
+    db: Session,
+    site_id: int,
+    subreddit: str,
+    *,
+    account_id: int | None = None,
+) -> RedditCommunity | None:
+    name = normalize_subreddit(subreddit)
+    q = db.query(RedditCommunity).filter(
+        RedditCommunity.site_id == site_id,
+        RedditCommunity.name == name,
+    )
+    rows = q.all()
+    if not rows:
+        return None
+    if account_id is not None:
+        for row in rows:
+            if row.purpose == "persona" and row.account_id == account_id:
+                return row
+        for row in rows:
+            if row.purpose == "promo" and row.account_id is None:
+                return row
+    # Prefer a row that already has official rules
+    for row in rows:
+        if row.rules_text:
+            return row
+    return rows[0]
+
+
+def _rules_text_for_subreddit(
+    db: Session,
+    site_id: int,
+    subreddit: str,
+    *,
+    account_id: int | None = None,
+) -> str | None:
+    row = _community_for_subreddit(db, site_id, subreddit, account_id=account_id)
+    return (row.rules_text or None) if row else None
+
+
+def _reddit_client_for_rules(
+    db: Session,
+    site_id: int,
+    *,
+    preferred_account_id: int | None = None,
+):
+    """选一个已同步的 Zernio Reddit 账号用于拉版规。"""
+    if preferred_account_id:
+        acc = reddit_oauth.get_site_account(db, site_id, preferred_account_id)
+        if acc:
+            return get_reddit_client_for_account(acc)
+    accounts = reddit_oauth.list_reddit_accounts(db, site_id)
+    for acc in accounts:
+        if getattr(acc, "is_active", True):
+            return get_reddit_client_for_account(acc)
+    if accounts:
+        return get_reddit_client_for_account(accounts[0])
+    return None
+
+
+def _fetch_community_rules(
+    db: Session,
+    site_id: int,
+    name: str,
+    *,
+    preferred_account_id: int | None = None,
+    client=None,
+):
+    """优先 Zernio；无账号时再试公开/OAuth 回退。"""
+    zc = client or _reddit_client_for_rules(
+        db, site_id, preferred_account_id=preferred_account_id
+    )
+    if zc is not None:
+        return fetch_subreddit_rules_via_zernio(zc, name)
+    return fetch_subreddit_rules(name)
 
 
 def _persona_prompt_for(db: Session, site_id: int, account_id: int) -> str:
@@ -319,8 +395,8 @@ def _key_out(row: ZernioApiKey) -> ZernioKeyOut:
     )
 
 
-def _accounts_out(db: Session, accounts) -> list[RedditAccountOut]:
-    labels = {k.id: k.label for k in list_all_keys(db)}
+def _accounts_out(db: Session, accounts, site_id: int) -> list[RedditAccountOut]:
+    labels = {k.id: k.label for k in list_all_keys(db, site_id)}
     profiles = {
         p.account_id: p
         for p in db.query(RedditAccountProfile)
@@ -364,14 +440,15 @@ def _accounts_out(db: Session, accounts) -> list[RedditAccountOut]:
 
 def _status_out(
     db: Session,
+    site_id: int,
     accounts,
     sync_errors: list[str] | None = None,
 ) -> RedditStatusOut:
     return RedditStatusOut(
-        configured=is_zernio_ready(db),
+        configured=is_zernio_ready(db, site_id),
         connected=bool(accounts),
-        accounts=_accounts_out(db, accounts),
-        zernio_key_count=len(list_enabled_keys(db)),
+        accounts=_accounts_out(db, accounts, site_id),
+        zernio_key_count=len(list_enabled_keys(db, site_id)),
         sync_errors=sync_errors or [],
     )
 
@@ -381,7 +458,7 @@ def reddit_status(
     db: Session = Depends(get_db),
     ctx: SiteContext = Depends(get_site_context),
 ) -> RedditStatusOut:
-    return _status_out(db, reddit_oauth.list_reddit_accounts(db, ctx.site.id))
+    return _status_out(db, ctx.site.id, reddit_oauth.list_reddit_accounts(db, ctx.site.id))
 
 
 @router.post("/accounts/sync", response_model=RedditStatusOut)
@@ -394,7 +471,7 @@ def sync_accounts(
         accounts, errors = reddit_oauth.sync_zernio_accounts(db, current_user.id, ctx.site.id)
     except ZernioError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    return _status_out(db, accounts, errors)
+    return _status_out(db, ctx.site.id, accounts, errors)
 
 
 @router.get("/zernio-keys", response_model=list[ZernioKeyOut])
@@ -402,7 +479,7 @@ def list_zernio_keys(
     db: Session = Depends(get_db),
     ctx: SiteContext = Depends(get_site_context),
 ) -> list[ZernioKeyOut]:
-    return [_key_out(row) for row in list_all_keys(db)]
+    return [_key_out(row) for row in list_all_keys(db, ctx.site.id)]
 
 
 @router.post("/zernio-keys", response_model=ZernioKeyOut, status_code=status.HTTP_201_CREATED)
@@ -412,6 +489,7 @@ def create_zernio_key(
     ctx: SiteContext = Depends(require_site_write),
 ) -> ZernioKeyOut:
     row = ZernioApiKey(
+        site_id=ctx.site.id,
         label=payload.label.strip(),
         api_key=payload.api_key.strip(),
         profile_id=(payload.profile_id or "").strip() or None,
@@ -434,7 +512,11 @@ def update_zernio_key(
     db: Session = Depends(get_db),
     ctx: SiteContext = Depends(require_site_write),
 ) -> ZernioKeyOut:
-    row = db.query(ZernioApiKey).filter(ZernioApiKey.id == key_id).first()
+    row = (
+        db.query(ZernioApiKey)
+        .filter(ZernioApiKey.id == key_id, ZernioApiKey.site_id == ctx.site.id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Zernio Key 不存在")
     if payload.label is not None:
@@ -460,7 +542,11 @@ def delete_zernio_key(
     db: Session = Depends(get_db),
     ctx: SiteContext = Depends(require_site_write),
 ):
-    row = db.query(ZernioApiKey).filter(ZernioApiKey.id == key_id).first()
+    row = (
+        db.query(ZernioApiKey)
+        .filter(ZernioApiKey.id == key_id, ZernioApiKey.site_id == ctx.site.id)
+        .first()
+    )
     if not row:
         raise HTTPException(status_code=404, detail="Zernio Key 不存在")
     db.delete(row)
@@ -509,8 +595,12 @@ def generate_post(
     if not account:
         raise HTTPException(status_code=404, detail="Reddit 账号不存在")
 
+    allow_product = bool(payload.allow_product)
+    if allow_product and not payload.product_id:
+        raise HTTPException(status_code=400, detail="开启「允许提及产品」时必须选择产品")
+
     site_url = None
-    if payload.include_site_url and payload.post_type in {"pitfall", "guide"}:
+    if allow_product and payload.include_site_url:
         site_url = _site_url_from_domain(ctx.site.domain)
 
     purpose = _purpose_for_subreddit(db, ctx.site.id, payload.subreddit)
@@ -518,12 +608,13 @@ def generate_post(
         post_type=payload.post_type,
         community_purpose=purpose,
         include_site_url=bool(site_url),
+        allow_product=allow_product,
     )
 
     persona_prompt = _persona_prompt_for(db, ctx.site.id, account.id)
     product_brief = None
     keyword = ""
-    if payload.product_id:
+    if allow_product and payload.product_id:
         brand, product = _require_brand_product(
             db, ctx.site.id, payload.brand_id, payload.product_id
         )
@@ -563,6 +654,10 @@ def generate_post(
             site_url=site_url,
             persona_prompt=persona_prompt,
             product_brief=product_brief,
+            allow_product=allow_product,
+            community_rules=_rules_text_for_subreddit(
+                db, ctx.site.id, payload.subreddit, account_id=account.id
+            ),
             avoid_titles=recent_titles,
         )
     except DeepSeekError as exc:
@@ -813,6 +908,9 @@ def _generate_comment_for_url(
             persona_prompt=persona_prompt,
             product_brief=product_brief,
             site_url=site_url,
+            community_rules=_rules_text_for_subreddit(
+                db, ctx.site.id, subreddit, account_id=account.id
+            ),
             seed=account.id + len(title),
         )
         comment_body = generated.body
@@ -1182,7 +1280,7 @@ def discover_search(
         if picked:
             client_account = picked
     if client_account is None:
-        if is_zernio_ready(db):
+        if is_zernio_ready(db, ctx.site.id):
             raise HTTPException(status_code=400, detail="请先同步 Reddit 账号后再搜索")
         client = get_reddit_client_for_account(
             type("A", (), {"id": 0, "config": None, "access_token": None})()
@@ -1352,7 +1450,7 @@ def list_account_profiles(
     accounts = reddit_oauth.list_reddit_accounts(db, ctx.site.id)
     for acc in accounts:
         get_or_create_profile(db, ctx.site.id, acc.id)
-    return _accounts_out(db, accounts)
+    return _accounts_out(db, accounts, ctx.site.id)
 
 
 @router.patch("/accounts/{account_id}/profile", response_model=RedditAccountOut)
@@ -1389,7 +1487,7 @@ def update_account_profile(
     ensure_karma_stage_consistency(db, profile)
     db.commit()
     db.refresh(profile)
-    return _accounts_out(db, [account])[0]
+    return _accounts_out(db, [account], ctx.site.id)[0]
 
 
 # ============ 社区库 ============
@@ -1466,11 +1564,78 @@ def create_community(
     row = RedditCommunity(site_id=ctx.site.id, account_id=owner, **data)
     row.name = name
     apply_verify_to_community(row, verified)
+    rules_client = None
+    if owner:
+        acc = reddit_oauth.get_site_account(db, ctx.site.id, owner)
+        if acc:
+            rules_client = get_reddit_client_for_account(acc)
+    rules = _fetch_community_rules(
+        db,
+        ctx.site.id,
+        name,
+        preferred_account_id=owner,
+        client=rules_client,
+    )
+    apply_rules_to_community(row, rules)
     db.add(row)
     db.commit()
     db.refresh(row)
     return row
 
+
+@router.post("/communities/{community_id}/refresh-rules", response_model=RedditCommunityOut)
+def refresh_community_rules(
+    community_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+) -> RedditCommunity:
+    row = (
+        db.query(RedditCommunity)
+        .filter(RedditCommunity.id == community_id, RedditCommunity.site_id == ctx.site.id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="社区不存在")
+    zc = _reddit_client_for_rules(
+        db, ctx.site.id, preferred_account_id=row.account_id
+    )
+    if zc is None:
+        raise HTTPException(
+            status_code=400,
+            detail="请先在「社交账号」同步至少一个 Reddit 账号（Zernio），再用它拉取版规",
+        )
+    # 只打 Zernio 版规接口，不再强制公开 about.json（易 403，且占用时机）
+    verify, rules = refresh_community_existence_and_rules(
+        row, force=True, zernio_client=zc, skip_public_verify=True
+    )
+    if verify.exists is False:
+        db.commit()
+        db.refresh(row)
+        raise HTTPException(
+            status_code=400,
+            detail=f"r/{row.name} 不存在或无法访问（{verify.error}）",
+        )
+    if not rules.rules_text and rules.error:
+        db.commit()
+        db.refresh(row)
+        # 限流且已有旧版规：保留旧数据，用 429 提示等待，避免误以为版规丢失
+        if rules.rate_limited:
+            headers = {}
+            if rules.retry_after:
+                headers["Retry-After"] = str(int(rules.retry_after))
+            raise HTTPException(
+                status_code=429,
+                detail=rules.error
+                + ("；已保留现有版规" if row.rules_text else ""),
+                headers=headers or None,
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"版规拉取失败：{rules.error}（社区仍保留，可稍后重试）",
+        )
+    db.commit()
+    db.refresh(row)
+    return row
 
 @router.patch("/communities/{community_id}", response_model=RedditCommunityOut)
 def update_community(
@@ -1569,6 +1734,8 @@ def suggest_communities(
                 purpose="persona",
             )
             apply_verify_to_community(row, result)
+            rules = fetch_subreddit_rules_via_zernio(client, result.name)
+            apply_rules_to_community(row, rules)
             db.add(row)
             existing.add(result.name.lower())
             kept.append(result.name)

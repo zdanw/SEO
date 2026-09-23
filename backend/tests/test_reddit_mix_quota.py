@@ -50,3 +50,8 @@ def test_resolve_post_intent_follows_community_for_other_types():
     assert resolve_post_intent(post_type="pitfall", community_purpose="persona") == "casual"
     assert resolve_post_intent(post_type="guide", community_purpose="promo") == "promo"
     assert resolve_post_intent(post_type="unpopular", community_purpose=None, include_site_url=True) == "promo"
+
+
+def test_resolve_post_intent_allow_product_overrides_type():
+    assert resolve_post_intent(post_type="vent", community_purpose="persona", allow_product=True) == "promo"
+    assert resolve_post_intent(post_type="auto", community_purpose="promo", allow_product=False) == "casual"

@@ -122,6 +122,7 @@ import {
   listCommunities,
   type RedditBrand, type RedditBrandProduct, type RedditCommunity,
 } from '@/api/reddit'
+import { useSiteReload } from '@/composables/useSiteReload'
 
 const brands = ref<RedditBrand[]>([])
 const products = ref<RedditBrandProduct[]>([])
@@ -231,9 +232,12 @@ async function removeProduct(row: RedditBrandProduct) {
   await loadAll()
 }
 
-onMounted(async () => {
+async function reloadPage() {
   await Promise.all([loadAll(), loadPromoCommunities()])
-})
+}
+
+onMounted(reloadPage)
+useSiteReload(reloadPage)
 </script>
 
 <style lang="scss" scoped>

@@ -5,7 +5,7 @@
         <div class="card-title-row">
           <div>
             <span class="card-title">Zernio Key</span>
-            <p class="muted" style="margin: 4px 0 0">用于连接 Zernio 并同步 Reddit 账号；可配置多把 Key。</p>
+            <p class="muted" style="margin: 4px 0 0">当前站点专用；用于连接 Zernio 并同步 Reddit 账号，可配置多把 Key。</p>
           </div>
           <el-button type="primary" @click="keyDialog = true">添加 Key</el-button>
         </div>
@@ -101,6 +101,7 @@ import {
   listZernioKeys, createZernioKey, updateZernioKey, deleteZernioKey,
   type RedditStatus, type ZernioKey,
 } from '@/api/reddit'
+import { useSiteReload } from '@/composables/useSiteReload'
 
 const status = ref<RedditStatus | null>(null)
 const statusLoading = ref(false)
@@ -196,6 +197,7 @@ async function removeKey(row: ZernioKey) {
 }
 
 onMounted(refresh)
+useSiteReload(refresh)
 </script>
 
 <style lang="scss" scoped>

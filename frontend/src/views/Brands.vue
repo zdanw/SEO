@@ -55,6 +55,7 @@ import {
   listBrands, createBrand, updateBrand, deleteBrand,
   type RedditBrand,
 } from '@/api/reddit'
+import { useSiteReload } from '@/composables/useSiteReload'
 
 const brands = ref<RedditBrand[]>([])
 const loading = ref(false)
@@ -123,6 +124,7 @@ async function removeBrand(row: RedditBrand) {
 }
 
 onMounted(loadBrands)
+useSiteReload(loadBrands)
 </script>
 
 <style lang="scss" scoped>

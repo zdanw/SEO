@@ -3,8 +3,9 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ConfigDict
 
-PostType = Literal["pitfall", "vent", "unpopular", "guide", "help_seek"]
-POST_TYPES: tuple[str, ...] = ("pitfall", "vent", "unpopular", "guide", "help_seek")
+PostType = Literal["auto", "pitfall", "vent", "unpopular", "guide", "help_seek"]
+POST_TYPES: tuple[str, ...] = ("auto", "pitfall", "vent", "unpopular", "guide", "help_seek")
+MANUAL_POST_TYPES: tuple[str, ...] = ("pitfall", "vent", "unpopular", "guide", "help_seek")
 ReviewStatus = Literal[
     "draft", "pending_review", "approved", "rejected", "posting", "posted", "failed"
 ]
@@ -105,6 +106,8 @@ class RedditCommunityOut(RedditCommunityBase):
     posts_7d: Optional[int] = None
     activity_score: Optional[float] = None
     verify_error: Optional[str] = None
+    rules_text: Optional[str] = None
+    rules_fetched_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -138,10 +141,11 @@ class RedditOAuthStartOut(BaseModel):
 
 class RedditPostGenerateIn(BaseModel):
     account_id: int
-    post_type: PostType
+    post_type: PostType = "auto"
     subreddit: str = Field(min_length=1, max_length=100)
     brand_id: Optional[int] = None
     product_id: Optional[int] = None
+    allow_product: bool = False
     include_site_url: bool = False
 
 

@@ -6,6 +6,7 @@ import axios, {
 } from 'axios'
 import { ElMessage } from 'element-plus'
 import router from '@/router'
+import { useSiteStore } from '@/stores/site'
 
 const http: AxiosInstance = axios.create({
   baseURL: '/api/v1',
@@ -20,6 +21,19 @@ http.interceptors.request.use(
     const token = localStorage.getItem('access_token')
     if (token && config.headers) {
       config.headers.Authorization = `Bearer ${token}`
+    }
+    // 站点 CRUD 本身不注入 X-Site-Id（按路径 site_id 鉴权）
+    const url = config.url || ''
+    const isSitesApi = url === '/sites' || url.startsWith('/sites/') || url.startsWith('/sites?')
+    if (!isSitesApi && config.headers) {
+      try {
+        const siteId = useSiteStore().currentSiteId
+        if (siteId != null) {
+          config.headers['X-Site-Id'] = String(siteId)
+        }
+      } catch {
+        // Pinia 尚未就绪时跳过
+      }
     }
     return config
   },

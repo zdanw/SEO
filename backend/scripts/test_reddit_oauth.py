@@ -21,9 +21,9 @@ def main() -> None:
     print(f"ZERNIO_API_BASE: {settings.ZERNIO_API_BASE}")
     db = SessionLocal()
     try:
-        keys = list_enabled_keys(db)
-        print(f"enabled zernio_api_keys: {len(keys)}")
-        print(f"is_zernio_ready(db): {is_zernio_ready(db)}\n")
+        keys = list_enabled_keys(db, site_id=1)
+        print(f"enabled zernio_api_keys (site 1): {len(keys)}")
+        print(f"is_zernio_ready(db, 1): {is_zernio_ready(db, 1)}\n")
     finally:
         db.close()
 

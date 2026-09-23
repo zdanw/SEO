@@ -29,6 +29,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '数据监控', icon: 'DataBoard' },
       },
       {
+        path: 'sites',
+        name: 'Sites',
+        component: () => import('@/views/Sites.vue'),
+        meta: { title: '站点', icon: 'Platform' },
+      },
+      {
         path: 'social',
         name: 'SocialScheduler',
         component: () => import('@/views/SocialScheduler.vue'),

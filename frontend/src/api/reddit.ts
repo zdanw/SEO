@@ -1,6 +1,6 @@
 import http from './http'
 
-export type PostType = 'pitfall' | 'vent' | 'unpopular' | 'guide' | 'help_seek'
+export type PostType = 'auto' | 'pitfall' | 'vent' | 'unpopular' | 'guide' | 'help_seek'
 export type ReviewStatus =
   | 'draft' | 'pending_review' | 'approved' | 'rejected' | 'posting' | 'posted' | 'failed'
 export type AccountRole = 'warmup' | 'seeding' | 'expert'
@@ -119,12 +119,16 @@ export interface RedditCommunity {
   purpose?: CommunityPurpose
   account_id?: number | null
   rules_note?: string | null
+  rules_text?: string | null
+  rules_fetched_at?: string | null
   allows_links: boolean
   promo_weekday?: number | null
   daily_post_limit: number
   best_hour_utc?: number | null
   priority: number
   is_active: boolean
+  exists?: boolean | null
+  verify_error?: string | null
   created_at: string
   updated_at: string
 }
@@ -233,6 +237,10 @@ export function deleteCommunity(id: number) {
   return http.delete<any, void>(`/reddit/communities/${id}`)
 }
 
+export function refreshCommunityRules(id: number) {
+  return http.post<any, RedditCommunity>(`/reddit/communities/${id}/refresh-rules`, {})
+}
+
 // ============ Zernio Key ============
 export function listZernioKeys() {
   return http.get<any, ZernioKey[]>('/reddit/zernio-keys')
@@ -327,6 +335,7 @@ export function generateRedditPost(payload: {
   subreddit: string
   brand_id?: number
   product_id?: number
+  allow_product?: boolean
   include_site_url?: boolean
 }) {
   return http.post<any, RedditPost>('/reddit/posts/generate', payload)

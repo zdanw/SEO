@@ -152,6 +152,7 @@ import {
   type TrendsData,
 } from '@/api/serp'
 import { applyRankTrendChart, formatKeywordTrendLabel } from '@/utils/rankTrendChart'
+import { useSiteReload } from '@/composables/useSiteReload'
 
 const activeTab = ref('trends')
 
@@ -343,6 +344,17 @@ onMounted(async () => {
   await loadLatest()
   window.addEventListener('resize', handleResize)
 })
+
+async function reloadForSite() {
+  selectedKeywordIds.value = []
+  await loadSerpConfig()
+  await reloadKeywords()
+  await loadLatest()
+  if (activeTab.value === 'trends') await loadTrends()
+  if (activeTab.value === 'snapshots') await loadSnapshots()
+}
+
+useSiteReload(reloadForSite)
 
 onActivated(async () => {
   await loadSerpConfig()

@@ -19,6 +19,17 @@ logger = logging.getLogger(__name__)
 ZERNIO_DEFAULT_BASE = "https://zernio.com/api/v1"
 _UNSET = object()
 _RETRY_IN_RE = re.compile(r"Retry in (\d+)\s*s", re.IGNORECASE)
+_QUOTA_RESET_RE = re.compile(r"Quota resets in (\d+)\s*s", re.IGNORECASE)
+
+
+def _classify_429(msg: str, body: str) -> str:
+    """区分配额用尽 vs 瞬时账号限流（仅用于日志）。"""
+    blob = f"{msg}\n{body}".lower()
+    if "quota" in blob or "quota resets" in blob:
+        return "quota_exhausted"
+    if "rate_limited" in blob or "rate limit" in blob or "retry in" in blob:
+        return "rate_limited"
+    return "unknown_429"
 _SEARCH_CACHE: dict[tuple[str, str, str, int], tuple[float, list[dict[str, Any]]]] = {}
 _SEARCH_CACHE_TTL = 120.0
 _SEARCH_CACHE_STALE_TTL = 600.0
@@ -104,6 +115,10 @@ class ZernioClient:
             matched = _RETRY_IN_RE.search(blob or "")
             if matched:
                 retry_after = int(matched.group(1))
+        if retry_after is None:
+            matched = _QUOTA_RESET_RE.search(blob or "")
+            if matched:
+                retry_after = int(matched.group(1))
         if err and code:
             msg = f"Zernio {status_code} ({code}): {err}"
         elif err:
@@ -141,7 +156,20 @@ class ZernioClient:
                 resp = client.request(method, url, **req_kwargs)
             if resp.status_code >= 400:
                 msg, retry_after = self._parse_error(resp.status_code, resp.text)
-                logger.warning("Zernio %s %s -> %s", method, path, resp.status_code)
+                if resp.status_code == 429:
+                    body = (resp.text or "").strip().replace("\n", " ")
+                    kind = _classify_429(msg, body)
+                    logger.warning(
+                        "Zernio %s %s -> 429 kind=%s retry_after=%s upstream=%s body=%s",
+                        method,
+                        path,
+                        kind,
+                        retry_after,
+                        msg,
+                        (body[:500] if body else "(empty)"),
+                    )
+                else:
+                    logger.warning("Zernio %s %s -> %s", method, path, resp.status_code)
                 if breaker is not None and (resp.status_code >= 500 or resp.status_code == 429):
                     breaker.record_failure()
                 raise ZernioError(msg, status_code=resp.status_code, retry_after=retry_after)
@@ -330,6 +358,33 @@ class ZernioClient:
             },
         )
         return self._map_search_items(data.get("items") or [], subreddit)
+
+    def get_subreddit_rules(
+        self,
+        zernio_account_id: str,
+        subreddit: str,
+    ) -> dict[str, Any]:
+        """GET /accounts/{id}/reddit-subreddits/{subreddit}/rules"""
+        sr = (subreddit or "").strip().removeprefix("r/").removeprefix("/")
+        if not sr:
+            raise ZernioError("subreddit 不能为空", status_code=400)
+        if self._mock_mode:
+            return {
+                "rules": [
+                    {
+                        "kind": "all",
+                        "shortName": "Be civil",
+                        "description": "Mock rule: stay on topic and be civil.",
+                        "violationReason": "Incivility",
+                        "priority": 0,
+                    }
+                ],
+                "siteRules": ["Spam"],
+            }
+        path = f"/accounts/{zernio_account_id}/reddit-subreddits/{sr}/rules"
+        logger.info("Zernio get_subreddit_rules account=%s subreddit=%s", zernio_account_id, sr)
+        data = self._request("GET", path)
+        return data if isinstance(data, dict) else {"rules": [], "siteRules": []}
 
     def vote_reddit_thing(
         self,

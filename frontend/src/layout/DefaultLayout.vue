@@ -47,6 +47,23 @@
           </div>
         </div>
         <div class="user-info">
+          <el-select
+            class="site-switcher"
+            :model-value="currentSiteId"
+            clearable
+            filterable
+            placeholder="默认站点"
+            :loading="siteLoading"
+            @update:model-value="onSiteChange"
+          >
+            <el-option
+              v-for="s in sites"
+              :key="s.id"
+              :label="`${s.name} · ${s.domain}`"
+              :value="s.id"
+            />
+          </el-select>
+          <el-button type="primary" link size="small" @click="router.push('/sites')">管理站点</el-button>
           <el-avatar :size="32" :icon="UserFilled" />
           <span class="user-email">{{ email }}</span>
           <el-button type="danger" link size="small" @click="logout">退出</el-button>
@@ -64,23 +81,28 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useRoute, useRouter } from 'vue-router'
 import {
   DataBoard, Share, TrendCharts, Goods, User, OfficeBuilding,
-  UserFilled, Fold, Expand, Monitor,
+  UserFilled, Fold, Expand, Monitor, Platform,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { useSiteStore } from '@/stores/site'
 
 const route = useRoute()
 const router = useRouter()
 const collapsed = ref(false)
+const siteStore = useSiteStore()
+const { sites, currentSiteId, loading: siteLoading } = storeToRefs(siteStore)
 
 const menuGroups = [
   {
     title: '工作台',
     items: [
       { path: '/dashboard', title: '数据监控', icon: DataBoard },
+      { path: '/sites', title: '站点', icon: Platform },
     ],
   },
   {
@@ -98,6 +120,7 @@ const menuGroups = [
 
 const pageSubtitles: Record<string, string> = {
   '/dashboard': '关键词排名与社交分发核心指标一览',
+  '/sites': '客户站点 CRUD；顶栏切换当前工作站',
   '/social': 'Reddit 创作、审核与发布',
   '/accounts': 'Zernio Key 与 Reddit 账号同步管理',
   '/brands': '维护品牌资料',
@@ -112,9 +135,21 @@ const currentTitle = computed(() => (route.meta.title as string) || '')
 const currentSubtitle = computed(() => pageSubtitles[activeMenu.value] || '')
 const email = computed(() => localStorage.getItem('user_email') || 'admin@example.com')
 
+function onSiteChange(siteId: number | null | undefined) {
+  const next = siteId ?? null
+  siteStore.setCurrentSite(next)
+  const site = sites.value.find((s) => s.id === next)
+  ElMessage.success(site ? `已切换到「${site.name}」` : '已使用默认站点')
+}
+
+onMounted(() => {
+  void siteStore.loadSites()
+})
+
 function logout() {
   localStorage.removeItem('access_token')
   localStorage.removeItem('user_email')
+  siteStore.clear()
   ElMessage.success('已退出登录')
   router.replace('/login')
 }
@@ -227,12 +262,16 @@ function logout() {
     }
   }
 
-    .user-info {
+  .user-info {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
     font-size: 14px;
+
+    .site-switcher {
+      width: 200px;
+    }
 
     .user-email {
       max-width: 180px;
@@ -264,6 +303,10 @@ function logout() {
 @media (max-width: 768px) {
   .header .heading-subtitle {
     display: none;
+  }
+
+  .header .site-switcher {
+    width: 140px;
   }
 
   .header .user-email {

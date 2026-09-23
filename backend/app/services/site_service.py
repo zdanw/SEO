@@ -2,6 +2,7 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.models.zernio_key import ZernioApiKey
 from app.models.client_site import ClientSite
 from app.models.site_member import SiteMember
 from app.models.keyword import Keyword
@@ -93,6 +94,9 @@ def delete_client_site(db: Session, site_id: int) -> None:
 
     db.query(Keyword).filter(Keyword.site_id == site_id).delete(synchronize_session=False)
     db.query(SocialAccount).filter(SocialAccount.site_id == site_id).delete(
+        synchronize_session=False
+    )
+    db.query(ZernioApiKey).filter(ZernioApiKey.site_id == site_id).delete(
         synchronize_session=False
     )
 

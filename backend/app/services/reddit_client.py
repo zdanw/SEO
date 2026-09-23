@@ -119,6 +119,10 @@ class RedditApiClient:
         sr = normalize_subreddit(subreddit)
         return self._call(self._zernio.list_feed, self._require_zernio_id(), sr, limit)
 
+    def get_subreddit_rules(self, subreddit: str) -> dict[str, Any]:
+        sr = normalize_subreddit(subreddit)
+        return self._call(self._zernio.get_subreddit_rules, self._require_zernio_id(), sr)
+
     def vote(self, thing_id: str, direction: int = 1) -> dict[str, Any]:
         return self._call(self._zernio.vote_reddit_thing, self._require_zernio_id(), thing_id, direction)
 
@@ -135,6 +139,7 @@ class RedditApiClient:
 def resolve_zernio_api_credentials(
     config: dict | None,
     db: Session | None = None,
+    site_id: int | None = None,
 ) -> tuple[str | None, str | None]:
     """Return (api_key, profile_id) from the account's linked zernio_api_keys row.
 
@@ -159,7 +164,7 @@ def resolve_zernio_api_credentials(
     try:
         from app.services.zernio_keys import get_enabled_key
 
-        row = get_enabled_key(session, key_id)
+        row = get_enabled_key(session, key_id, site_id=site_id)
         if not row:
             raise RedditApiError("Zernio Key 已删除或禁用，请重新同步", status_code=400)
         return row.api_key, row.profile_id
@@ -176,7 +181,8 @@ def get_reddit_client_for_account(account) -> RedditApiClient:
             db = object_session(account)
         except UnmappedInstanceError:
             db = None
-    api_key, profile_id = resolve_zernio_api_credentials(cfg, db)
+    site_id = getattr(account, "site_id", None) if account else None
+    api_key, profile_id = resolve_zernio_api_credentials(cfg, db, site_id=site_id)
     return RedditApiClient(
         account_id=getattr(account, "id", 0) or 0,
         zernio_account_id=zernio_account_id_of(account) if account else None,

@@ -85,8 +85,11 @@ def resolve_post_intent(
     post_type: str,
     community_purpose: str | None,
     include_site_url: bool = False,
+    allow_product: bool | None = None,
 ) -> str:
-    """发帖意图：树洞/场景求助强制 casual；其余按社区用途与是否带链。"""
+    """发帖意图：由「允许提及产品」开关决定；未传开关时兼容旧规则。"""
+    if allow_product is not None:
+        return "promo" if allow_product else "casual"
     if post_type in {"vent", "help_seek"}:
         return "casual"
     return resolve_intent(community_purpose=community_purpose, include_site_url=include_site_url)

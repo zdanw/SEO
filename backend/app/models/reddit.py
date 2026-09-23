@@ -37,7 +37,7 @@ class RedditPost(Base):
     account_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("social_accounts.id"), nullable=False, index=True
     )
-    post_type: Mapped[str] = mapped_column(String(20), nullable=False)  # pitfall/vent/unpopular/guide/help_seek
+    post_type: Mapped[str] = mapped_column(String(20), nullable=False)  # auto/pitfall/vent/unpopular/guide/help_seek
     subreddit: Mapped[str] = mapped_column(String(100), nullable=False)
     keyword: Mapped[str] = mapped_column(String(200), nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -170,6 +170,8 @@ class RedditCommunity(Base):
     # persona = 人设兴趣社区 / promo = 用户手填的产品社区
     purpose: Mapped[str] = mapped_column(String(20), default="persona", nullable=False, index=True)
     rules_note: Mapped[str | None] = mapped_column(Text, nullable=True)  # 版规备忘（禁外链/固定日自推广等）
+    rules_text: Mapped[str | None] = mapped_column(Text, nullable=True)  # Reddit 官方版规拼接
+    rules_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     allows_links: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # 允许自推广的星期（0=周一 … 6=周日），NULL 表示不限
     promo_weekday: Mapped[int | None] = mapped_column(Integer, nullable=True)
