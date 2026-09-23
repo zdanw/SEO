@@ -426,6 +426,7 @@
           <el-table-column label="AI" width="70">
             <template #default="{ row }">
               <el-tag v-if="row.ai_risk === 'likely_ai'" size="small" type="danger">疑似</el-tag>
+              <el-tag v-else-if="row.ai_risk === 'mixed'" size="small" type="warning">偏AI</el-tag>
               <span v-else class="muted">—</span>
             </template>
           </el-table-column>

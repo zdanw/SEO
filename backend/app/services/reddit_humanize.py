@@ -1,4 +1,4 @@
-"""评论口语化后处理：少量自然笔误，不改品牌名和数字；去掉破折号。"""
+"""评论口语化后处理：按账号 seed 抽笔误子集；不改品牌名和数字；去掉破折号。"""
 from __future__ import annotations
 
 import random
@@ -13,7 +13,7 @@ _OPENER_SWAPS = (
     "Idk, ",
 )
 
-# 仅替换完整常见词，避免伤品牌/数字
+# 扩大词表；实际每次只按 seed 抽 ACCOUNT_TYPO_COUNT 对，避免矩阵指纹
 _TYPO_PAIRS: tuple[tuple[str, str], ...] = (
     ("the", "teh"),
     ("and", "adn"),
@@ -27,10 +27,54 @@ _TYPO_PAIRS: tuple[tuple[str, str], ...] = (
     ("you're", "your"),
     ("about", "abotu"),
     ("would", "woudl"),
+    ("should", "shoudl"),
+    ("could", "coudl"),
+    ("before", "befroe"),
+    ("after", "afetr"),
+    ("something", "someting"),
+    ("everything", "everyting"),
+    ("nothing", "nothign"),
+    ("someone", "someon"),
+    ("people", "peopel"),
+    ("friend", "freind"),
+    ("night", "nigth"),
+    ("morning", "mroning"),
+    ("tomorrow", "tomorow"),
+    ("yesterday", "yesteday"),
+    ("definitely", "definately"),
+    ("probably", "probaly"),
+    ("maybe", "mayb"),
+    ("always", "alwyas"),
+    ("never", "neevr"),
+    ("going", "goign"),
+    ("trying", "tryign"),
+    ("until", "untill"),
+    ("through", "throuhg"),
+    ("though", "thoguh"),
+    ("enough", "enoguh"),
+    ("different", "diffrent"),
+    ("between", "betwen"),
+    ("without", "withotu"),
+    ("around", "aroudn"),
+    ("pretty", "prety"),
+    ("little", "littel"),
+    ("better", "beter"),
+    ("happened", "happend"),
+    ("experience", "experiance"),
 )
+
+ACCOUNT_TYPO_COUNT = 4
 
 _EM_DASH_RE = re.compile(r"[—–]+")
 _EM_DASH_SPACED_RE = re.compile(r"\s*[—–]+\s*")
+
+
+def typo_pairs_for_seed(seed: int | None, *, count: int = ACCOUNT_TYPO_COUNT) -> tuple[tuple[str, str], ...]:
+    """按账号/种子从总词表抽固定子集，各号错误风格不同。"""
+    pairs = list(_TYPO_PAIRS)
+    rng = random.Random(seed)
+    rng.shuffle(pairs)
+    return tuple(pairs[: max(1, min(count, len(pairs)))])
 
 
 def strip_em_dashes(text: str) -> str:
@@ -72,6 +116,7 @@ def humanize_comment(
         return diversify_opener(text, seed=seed)
 
     rng = random.Random(seed)
+    typo_pairs = typo_pairs_for_seed(seed)
     protected = {b.lower() for b in brand_names if b}
     tokens = re.findall(r"\S+|\s+", text)
     word_indexes = [
@@ -87,7 +132,7 @@ def humanize_comment(
             continue
         if core.lower() in protected:
             continue
-        for src, dst in _TYPO_PAIRS:
+        for src, dst in typo_pairs:
             if core.lower() == src:
                 replacement = _match_case(core, dst)
                 candidates.append((idx, prefix + replacement + suffix, src))

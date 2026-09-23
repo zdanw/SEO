@@ -1,5 +1,9 @@
-"""评论真人化：笔误次数受限，品牌名与数字不被改写。"""
-from app.services.reddit_humanize import diversify_opener, humanize_comment
+"""评论真人化：笔误次数受限，品牌名与数字不被改写；账号 seed 抽不同子集。"""
+from app.services.reddit_humanize import (
+    diversify_opener,
+    humanize_comment,
+    typo_pairs_for_seed,
+)
 
 
 def test_humanize_injects_at_most_two_typos_with_seed():
@@ -37,3 +41,11 @@ def test_strip_em_dashes():
     assert strip_em_dashes("Tried Bebcare — worked fine.") == "Tried Bebcare, worked fine."
     out = humanize_comment("Same here — nights are rough.", seed=3, max_typos=0)
     assert "—" not in out
+
+
+def test_typo_pairs_differ_by_account_seed():
+    a = set(typo_pairs_for_seed(1))
+    b = set(typo_pairs_for_seed(99))
+    assert len(a) == 4
+    assert len(b) == 4
+    assert a != b

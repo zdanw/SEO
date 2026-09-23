@@ -145,21 +145,58 @@ def shuffled_promo_keywords(terms: list[str], *, seed: int | None = None) -> lis
 
 
 def relevance_score(item: dict, terms: list[str]) -> int:
+    """词边界匹配，避免短词误伤（如 car ⊂ career）。多词短语仍用子串。"""
     if not terms:
         return 0
     text = f"{item.get('title') or ''} {item.get('body') or ''}".lower()
-    return sum(1 for t in terms if t and t.lower() in text)
+    hits = 0
+    for t in terms:
+        term = (t or "").strip().lower()
+        if not term:
+            continue
+        if " " in term:
+            if term in text:
+                hits += 1
+        elif re.search(rf"(?<!\w){re.escape(term)}(?!\w)", text):
+            hits += 1
+    return hits
 
 
-def prefer_product_relevant(items: list[dict], terms: list[str]) -> list[dict]:
+def opportunity_score(item: dict, *, now: datetime | None = None) -> float:
+    """问句 + 新鲜度 + 评论数少加分；评论很多则扣分。"""
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    score = 0.0
+    title = item.get("title") or ""
+    if QUESTION_RE.search(title):
+        score += 3.0
+    created = int(item.get("created_utc") or 0)
+    if created:
+        age_h = max(0.0, (now.timestamp() - created) / 3600.0)
+        score += max(0.0, 3.0 - age_h / 12.0)
+    n_comments = int(item.get("num_comments") or item.get("comment_count") or 0)
+    if n_comments < 5:
+        score += 2.0
+    elif n_comments < 15:
+        score += 1.0
+    else:
+        score -= 1.0
+    return score
+
+
+def rank_by_opportunity(items: list[dict], *, now: datetime | None = None) -> list[dict]:
+    return sorted(items, key=lambda i: opportunity_score(i, now=now), reverse=True)
+
+
+def prefer_product_relevant(items: list[dict], terms: list[str], *, now: datetime | None = None) -> list[dict]:
     """只保留标题/正文命中产品词的帖；无命中则返回空（不强行用不相关帖）。"""
     if not terms or not items:
         return list(items)
     scored = [(relevance_score(i, terms), i) for i in items]
     scored.sort(key=lambda x: (-x[0], 0))
     matched = [i for score, i in scored if score > 0]
-    # 命中后再把问句排前面
-    return prefer_questions(matched) if matched else []
+    return rank_by_opportunity(matched, now=now) if matched else []
 
 
 def suggest_persona_subreddits(interests: list[str], *, ai=None, limit: int = 12) -> list[str]:
@@ -252,10 +289,11 @@ def run_smart_discover(
                         rate_limited = True
                         break
                     continue
-                candidates = prefer_questions(
-                    filter_commentable(raw, already_commented=used_urls, now=now)
+                candidates = rank_by_opportunity(
+                    filter_commentable(raw, already_commented=used_urls, now=now),
+                    now=now,
                 )
-                candidates = prefer_product_relevant(candidates, terms)
+                candidates = prefer_product_relevant(candidates, terms, now=now)
                 if candidates:
                     break
             if rate_limited:
@@ -273,8 +311,9 @@ def run_smart_discover(
                 if status == 429 or "429" in last_error:
                     break
                 continue
-            candidates = prefer_questions(
-                filter_commentable(raw, already_commented=used_urls, now=now)
+            candidates = rank_by_opportunity(
+                filter_commentable(raw, already_commented=used_urls, now=now),
+                now=now,
             )
         else:
             keyword = subreddit
@@ -287,8 +326,9 @@ def run_smart_discover(
                 if status == 429 or "429" in last_error:
                     break
                 continue
-            candidates = prefer_questions(
-                filter_commentable(raw, already_commented=used_urls, now=now)
+            candidates = rank_by_opportunity(
+                filter_commentable(raw, already_commented=used_urls, now=now),
+                now=now,
             )
         for item in candidates[:posts_per_community]:
             if queued >= remaining_slots:

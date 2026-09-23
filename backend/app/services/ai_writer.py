@@ -84,6 +84,7 @@ CRITICAL coherence (must all be true):
 - Topic focus: {topic_line}
 - Belong in r/{subreddit}: match what that community actually posts. If it is meme/humor/shitpost oriented, keep it punchy and on-theme for that sub — do NOT write a dry techsupport / parenting / shopping essay that belongs elsewhere.
 {keyword_line}
+{examples_line}
 """
 
 REDDIT_VENT_PROMPT = """Write a Reddit late-night vent / emotional support post for r/{subreddit}.
@@ -422,7 +423,8 @@ Post body:
 {intent_line}
 {site_line}
 {rules_line}
-
+{examples_block}
+{revision_block}
 Write ONE short comment in English, 25-80 words:
 - Reply ONLY to this post. No unrelated product pitch.
 - Sound like everyday chat, maybe one concrete detail or a quick question
@@ -433,6 +435,13 @@ Write ONE short comment in English, 25-80 words:
 
 Output the comment text only, no prefix or quotes.
 """
+
+
+def format_revision_block(notes: str | None) -> str:
+    text = (notes or "").strip()
+    if not text:
+        return ""
+    return f"Revision guidance (must follow):\n{text}\n"
 
 
 # ============ 客户端 ============
@@ -589,10 +598,15 @@ class DeepSeekClient:
         allow_product: bool = False,
         community_rules: str | None = None,
         avoid_titles: list[str] | None = None,
+        community_examples: list[dict[str, str]] | None = None,
         rng: random.Random | None = None,
     ) -> dict[str, str]:
         """Generate Reddit post; post_type=auto invents format for the sub."""
         from app.services.reddit_community_verify import format_rules_prompt_line
+        from app.services.reddit_style import (
+            format_community_examples_block,
+            with_negative_examples,
+        )
 
         sr = subreddit.removeprefix("r/").strip()
         kw = (keyword or "").strip() or f"everyday life topics common in r/{sr}"
@@ -606,6 +620,8 @@ class DeepSeekClient:
             if (keyword or "").strip()
             else "- Pick one concrete incident; keep title and body locked to that incident."
         )
+        examples_raw = format_community_examples_block(community_examples, for_post=True)
+        examples_line = f"{examples_raw}\n" if examples_raw else ""
         brief = product_brief if allow_product else None
         extra = _reddit_post_extra_lines(persona_prompt, brief)
         picker = rng or random.Random()
@@ -614,6 +630,7 @@ class DeepSeekClient:
         if rules_line:
             site_line = f"{site_line}\n{rules_line}"
         product_rule = _product_rule_line(allow_product=allow_product)
+        system_prompt = with_negative_examples(REDDIT_POST_SYSTEM_PROMPT)
 
         templates = {
             "auto": REDDIT_AUTO_PROMPT,
@@ -638,11 +655,12 @@ class DeepSeekClient:
                 topic_line=topic_line,
                 keyword_line=keyword_line,
                 product_rule=product_rule,
+                examples_line=examples_line,
             )
             temp = 0.92 + picker.random() * 0.08
             raw = self.chat(
                 prompt,
-                system_prompt=REDDIT_POST_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 temperature=min(temp, 1.0),
                 max_tokens=800,
             )
@@ -691,9 +709,15 @@ class DeepSeekClient:
         persona_prompt: str = "",
         product_brief: dict | None = None,
         community_rules: str | None = None,
+        revision_notes: str | None = None,
+        community_examples: list[dict[str, str]] | None = None,
     ) -> str:
         """Generate a contextual Reddit comment (English)."""
         from app.services.reddit_community_verify import format_rules_prompt_line
+        from app.services.reddit_style import (
+            format_community_examples_block,
+            with_negative_examples,
+        )
 
         sr = subreddit.removeprefix("r/").strip()
         persona_line = f"Persona: {persona_prompt}" if persona_prompt else ""
@@ -723,6 +747,9 @@ class DeepSeekClient:
             )
             site_line = "Do not include links."
         rules_line = format_rules_prompt_line(community_rules)
+        revision_block = format_revision_block(revision_notes)
+        examples_raw = format_community_examples_block(community_examples, for_post=False)
+        examples_block = f"{examples_raw}\n" if examples_raw else ""
         prompt = REDDIT_COMMENT_PROMPT.format(
             subreddit=sr,
             post_title=post_title[:500] or "(untitled)",
@@ -731,11 +758,13 @@ class DeepSeekClient:
             intent_line=intent_line,
             site_line=site_line,
             rules_line=rules_line,
+            examples_block=examples_block,
+            revision_block=revision_block,
         )
         return strip_em_dashes(
             self.chat(
                 prompt,
-                system_prompt=REDDIT_SYSTEM_PROMPT,
+                system_prompt=with_negative_examples(REDDIT_SYSTEM_PROMPT),
                 temperature=0.95,
                 max_tokens=180,
             )

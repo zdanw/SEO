@@ -1,4 +1,4 @@
-"""90/10 内容配额：近窗口内产品向内容不得超过 10%。"""
+"""90/10 内容配额：近窗口内产品向内容不得超过 10%，小样本保底最多 2 条 promo。"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -7,21 +7,32 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 
 PROMO_RATIO_CAP = 0.10
+PROMO_FLOOR = 2
 _COUNTED_STATUSES = frozenset({"posted"})
 
 
 class MixQuotaExceeded(ValueError):
-    """再发布一条产品内容会超过 10% 上限。"""
+    """再发布一条产品内容会超过配额上限。"""
 
-    def __init__(self, message: str = "发布产品内容会超过近 7 天 10% 上限，请先发布人设讨论") -> None:
+    def __init__(
+        self,
+        message: str = "发布产品内容会超过近 7 天配额上限，请先发布人设讨论",
+    ) -> None:
         super().__init__(message)
+
+
+def max_promo_allowed(*, total_after: int) -> int:
+    """双轨：max(2, 总数×10%)。"""
+    if total_after <= 0:
+        return 0
+    return max(PROMO_FLOOR, int(total_after * PROMO_RATIO_CAP))
 
 
 def can_enqueue_promo(*, casual_count: int, promo_count: int) -> bool:
     total_after = casual_count + promo_count + 1
     if total_after <= 0:
         return False
-    return (promo_count + 1) / total_after <= PROMO_RATIO_CAP
+    return promo_count + 1 <= max_promo_allowed(total_after=total_after)
 
 
 def enforce_promo_quota(*, intent: str, casual_count: int, promo_count: int) -> None:
@@ -48,7 +59,7 @@ class MixCounts:
 
 
 def count_mix_window(db: Session, site_id: int, *, days: int = 7) -> MixCounts:
-    """统计站点近 N 天已发布帖+评的 casual/promo 数量。待审/草稿不计入配额。"""
+    """统计站点近 N 天已发布帖+评的 casual/promo 数量（按发布时间）。待审/草稿不计入配额。"""
     from app.models.reddit import RedditComment, RedditPost
 
     since = datetime.utcnow() - timedelta(days=days)
@@ -58,8 +69,9 @@ def count_mix_window(db: Session, site_id: int, *, days: int = 7) -> MixCounts:
             db.query(model.content_intent)
             .filter(
                 model.site_id == site_id,
-                model.created_at >= since,
                 model.status.in_(list(_COUNTED_STATUSES)),
+                model.published_at.isnot(None),
+                model.published_at >= since,
             )
             .all()
         )

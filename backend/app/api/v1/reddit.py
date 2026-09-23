@@ -647,6 +647,10 @@ def generate_post(
 
     try:
         ai = get_ai_client()
+        client = get_reddit_client_for_account(account)
+        from app.services.reddit_style import fetch_community_examples
+
+        community_examples = fetch_community_examples(client, payload.subreddit)
         generated = ai.generate_reddit_post(
             post_type=payload.post_type,
             subreddit=payload.subreddit,
@@ -659,6 +663,7 @@ def generate_post(
                 db, ctx.site.id, payload.subreddit, account_id=account.id
             ),
             avoid_titles=recent_titles,
+            community_examples=community_examples,
         )
     except DeepSeekError as exc:
         raise HTTPException(status_code=502, detail=f"AI 服务不可用：{exc}") from exc
@@ -899,6 +904,10 @@ def _generate_comment_for_url(
         resolved_product_id = product.id
     try:
         ai = get_ai_client()
+        client = get_reddit_client_for_account(account)
+        from app.services.reddit_style import fetch_community_examples
+
+        community_examples = fetch_community_examples(client, subreddit)
         generated = generate_comment_pipeline(
             ai,
             post_title=title,
@@ -912,6 +921,7 @@ def _generate_comment_for_url(
                 db, ctx.site.id, subreddit, account_id=account.id
             ),
             seed=account.id + len(title),
+            community_examples=community_examples,
         )
         comment_body = generated.body
         ai_risk = generated.ai_risk

@@ -3,11 +3,14 @@ from datetime import datetime, timezone
 
 from app.services.reddit_discover import (
     filter_commentable,
+    opportunity_score,
     pick_discover_targets,
     pick_promo_search_keyword,
     prefer_product_relevant,
     prefer_questions,
     product_search_terms,
+    rank_by_opportunity,
+    relevance_score,
     run_smart_discover,
     suggest_persona_subreddits,
 )
@@ -225,6 +228,34 @@ def test_prefer_product_relevant_drops_unrelated():
     assert {i["url"] for i in kept} == {"b", "c"}
     assert kept[0]["url"] == "b"  # 问句优先
     assert all(i["url"] != "a" for i in kept)
+
+
+def test_relevance_score_uses_word_boundary():
+    item = {"title": "career advice for new parents", "body": ""}
+    assert relevance_score(item, ["car"]) == 0
+    assert relevance_score(item, ["career"]) == 1
+    assert relevance_score({"title": "best baby monitors", "body": ""}, ["baby monitors"]) == 1
+
+
+def test_rank_by_opportunity_prefers_questions_and_low_replies():
+    now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+    items = [
+        {
+            "title": "Just sharing a win",
+            "url": "a",
+            "created_utc": int(now.timestamp()) - 3600,
+            "num_comments": 40,
+        },
+        {
+            "title": "help with night wakes?",
+            "url": "b",
+            "created_utc": int(now.timestamp()) - 600,
+            "num_comments": 2,
+        },
+    ]
+    ranked = rank_by_opportunity(items, now=now)
+    assert ranked[0]["url"] == "b"
+    assert opportunity_score(items[1], now=now) > opportunity_score(items[0], now=now)
 
 
 def test_run_smart_discover_promo_skips_when_no_product_terms():

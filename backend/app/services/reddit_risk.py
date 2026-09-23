@@ -33,9 +33,10 @@ DEFAULT_ROLE_LIMITS: dict[str, dict[str, int]] = {
 KARMA_SOFT_THRESHOLD = 300
 KARMA_FULL_THRESHOLD = 500
 
-# 内容查重阈值：与同账号近 7 天内容相似度超过该值视为模板化重复
+# 内容查重阈值：与同站点近 7 天内容相似度超过该值视为模板化重复（含跨账号）
 SIMILARITY_THRESHOLD = 0.85
 DEDUP_WINDOW_DAYS = 7
+DEDUP_COMPARE_LIMIT = 60
 
 
 class RiskViolation(Exception):
@@ -150,6 +151,48 @@ def get_subreddit_daily_usage(db: Session, site_id: int, subreddit: str) -> int:
     )
 
 
+def _norm_text(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def find_similar_on_site(
+    db: Session,
+    *,
+    model: type,
+    site_id: int,
+    body: str,
+    exclude_id: int | None = None,
+    kind_label: str = "内容",
+) -> str | None:
+    """站点级查重（矩阵号互相撞车也会拦）。过短正文跳过；最多比近 N 条。"""
+    norm = _norm_text(body)
+    if len(norm) < 40:
+        return None
+    week_ago = datetime.utcnow() - timedelta(days=DEDUP_WINDOW_DAYS)
+    recent = (
+        db.query(model)
+        .filter(
+            model.site_id == site_id,
+            model.created_at >= week_ago,
+            model.id != (exclude_id or 0),
+        )
+        .order_by(model.id.desc())
+        .limit(DEDUP_COMPARE_LIMIT)
+        .all()
+    )
+    for other in recent:
+        other_body = getattr(other, "body", None) or ""
+        ratio = difflib.SequenceMatcher(None, norm, _norm_text(other_body)).ratio()
+        if ratio >= SIMILARITY_THRESHOLD:
+            account = getattr(other, "account_id", None)
+            acc_bit = f"，账号 #{account}" if account is not None else ""
+            return (
+                f"{kind_label}与站点近期 #{other.id}{acc_bit} 相似度过高（{ratio:.0%}），"
+                f"疑似矩阵撞车/模板化重复，请改写后发布"
+            )
+    return None
+
+
 # ============ 风控校验 ============
 def check_post_publish(
     db: Session,
@@ -224,23 +267,17 @@ def check_post_publish(
         if dup:
             errors.append(f"同一站点链接近 {DEDUP_WINDOW_DAYS} 天已在 r/{dup.subreddit} 使用过，请勿重复多发")
 
-    # 7) 内容去重：与同账号近 7 天帖子正文相似度检测
-    week_ago = datetime.utcnow() - timedelta(days=DEDUP_WINDOW_DAYS)
-    recent = (
-        db.query(RedditPost)
-        .filter(
-            RedditPost.account_id == account_id,
-            RedditPost.created_at >= week_ago,
-            RedditPost.id != (exclude_post_id or 0),
-        )
-        .all()
+    # 7) 内容去重：与同站点近 7 天帖子正文相似度检测（含跨账号）
+    similar = find_similar_on_site(
+        db,
+        model=RedditPost,
+        site_id=site_id,
+        body=body,
+        exclude_id=exclude_post_id,
+        kind_label="内容",
     )
-    norm = " ".join((body or "").lower().split())
-    for other in recent:
-        ratio = difflib.SequenceMatcher(None, norm, " ".join((other.body or "").lower().split())).ratio()
-        if ratio >= SIMILARITY_THRESHOLD:
-            errors.append(f"内容与近期帖子 #{other.id} 相似度过高（{ratio:.0%}），疑似模板化重复，请改写后发布")
-            break
+    if similar:
+        errors.append(similar)
 
     return RiskReport(ok=not errors, errors=errors, warnings=warnings)
 
@@ -268,22 +305,16 @@ def check_comment_publish(
             f"已达账号每日评论上限（{usage['comments']}/{profile.daily_comment_limit}），杜绝集中刷屏"
         )
 
-    week_ago = datetime.utcnow() - timedelta(days=DEDUP_WINDOW_DAYS)
-    recent = (
-        db.query(RedditComment)
-        .filter(
-            RedditComment.account_id == account_id,
-            RedditComment.created_at >= week_ago,
-            RedditComment.id != (exclude_comment_id or 0),
-        )
-        .all()
+    similar = find_similar_on_site(
+        db,
+        model=RedditComment,
+        site_id=site_id,
+        body=body,
+        exclude_id=exclude_comment_id,
+        kind_label="评论",
     )
-    norm = " ".join((body or "").lower().split())
-    for other in recent:
-        ratio = difflib.SequenceMatcher(None, norm, " ".join((other.body or "").lower().split())).ratio()
-        if ratio >= SIMILARITY_THRESHOLD:
-            errors.append(f"评论与近期评论 #{other.id} 相似度过高（{ratio:.0%}），请差异化改写")
-            break
+    if similar:
+        errors.append(similar)
 
     return RiskReport(ok=not errors, errors=errors, warnings=warnings)
 

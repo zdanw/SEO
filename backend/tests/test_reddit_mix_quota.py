@@ -1,25 +1,34 @@
-"""90/10 产品内容配额：近窗口内已发布 promo 不得超过 10%。"""
+"""90/10 产品内容配额：近窗口内已发布 promo 双轨上限 max(2, 总数×10%)。"""
 from app.services.reddit_mix import (
     MixQuotaExceeded,
     _COUNTED_STATUSES,
     can_enqueue_promo,
     enforce_promo_quota,
+    max_promo_allowed,
     resolve_post_intent,
 )
 
 
 def test_third_promo_among_twenty_is_rejected():
-    """18 条人设 + 2 条产品后再加第 3 条产品应被拒。"""
+    """18 条人设 + 2 条产品后再加第 3 条产品应被拒（21×10%→2）。"""
     assert can_enqueue_promo(casual_count=18, promo_count=2) is False
 
 
 def test_tenth_item_may_be_first_promo():
-    """9 条人设后允许第 1 条产品（1/10 = 10%）。"""
+    """9 条人设后允许第 1 条产品。"""
     assert can_enqueue_promo(casual_count=9, promo_count=0) is True
 
 
-def test_cannot_start_with_promo():
-    assert can_enqueue_promo(casual_count=0, promo_count=0) is False
+def test_small_volume_allows_promo_with_floor():
+    """小样本：3 条人设后仍允许第 1 条产品（保底 2）。"""
+    assert can_enqueue_promo(casual_count=3, promo_count=0) is True
+    assert can_enqueue_promo(casual_count=0, promo_count=0) is True
+
+
+def test_max_promo_allowed_dual_track():
+    assert max_promo_allowed(total_after=4) == 2
+    assert max_promo_allowed(total_after=20) == 2
+    assert max_promo_allowed(total_after=30) == 3
 
 
 def test_casual_always_allowed():
@@ -30,7 +39,7 @@ def test_promo_raises_when_over_cap():
     try:
         enforce_promo_quota(intent="promo", casual_count=18, promo_count=2)
     except MixQuotaExceeded as exc:
-        assert "10%" in str(exc)
+        assert "配额" in str(exc) or "10%" in str(exc)
         return
     raise AssertionError("expected MixQuotaExceeded")
 
