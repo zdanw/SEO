@@ -3,18 +3,20 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from collections import Counter, defaultdict, deque
-from typing import Any
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
 _MAX_PATTERN_KEYS = 24
+_MAX_SAMPLES_PER_KEY = 6
 _PATTERN_TTL_SEC = 7 * 24 * 3600
 _EXAMPLES_TTL_SEC = 3600
 _hits_lock = threading.Lock()
-# site_id -> Counter / samples（Redis 不可用时的进程内兜底，仍按站点分桶）
+# site_id -> Counter / samples（Redis 不可用时的进程内兜底）
 _pattern_hits: dict[int, Counter[str]] = defaultdict(Counter)
 _match_samples: dict[int, dict[str, deque[str]]] = defaultdict(dict)
 _mem_examples: dict[str, tuple[float, list[dict[str, str]]]] = {}
@@ -33,28 +35,60 @@ def _pattern_redis_key(site_id: int) -> str:
     return f"reddit:ai_patterns:v1:{int(site_id)}"
 
 
+def _samples_redis_key(site_id: int) -> str:
+    return f"reddit:ai_samples:v1:{int(site_id)}"
+
+
 def _examples_redis_key(subreddit: str) -> str:
     return f"reddit:style_examples:v1:{subreddit.lower().strip()}"
+
+
+def redact_brand_text(text: str, brand_names: Iterable[str] | None = None) -> str:
+    """写入示例前脱敏品牌词，避免同站样本带出产品名。"""
+    out = " ".join(str(text or "").split()).strip()
+    if not out:
+        return ""
+    for b in brand_names or ():
+        name = str(b or "").strip()
+        if len(name) < 2:
+            continue
+        out = re.sub(re.escape(name), "[brand]", out, flags=re.IGNORECASE)
+    return out[:80]
 
 
 def record_detection_patterns(
     signs_of_ai: dict[str, Any] | None,
     *,
     site_id: int | None,
+    brand_names: Iterable[str] | None = None,
 ) -> None:
-    """按站点累计近期命中的 AI 模式键；不写入原文 matches，避免品牌串站。"""
-    if site_id is None or not signs_of_ai:
+    """按站点累计近期命中的 AI 模式键 + 脱敏后的 matches 示例。"""
+    if site_id is None:
+        logger.warning("record_detection_patterns skipped: site_id is None")
+        return
+    if not signs_of_ai:
         return
     patterns = signs_of_ai.get("patterns") or []
     if not patterns:
         return
     sid = int(site_id)
+    brands = {str(b).strip() for b in (brand_names or []) if b and str(b).strip()}
     increments: dict[str, int] = {}
+    samples_in: dict[str, list[str]] = {}
     for p in patterns:
         key = str(p.get("key") or "").strip()
         if not key:
             continue
         increments[key] = increments.get(key, 0) + max(1, int(p.get("count") or 1))
+        cleaned: list[str] = []
+        for m in p.get("matches") or []:
+            text = redact_brand_text(str(m), brands)
+            if text and text not in cleaned:
+                cleaned.append(text)
+            if len(cleaned) >= 3:
+                break
+        if cleaned:
+            samples_in[key] = cleaned
     if not increments:
         return
 
@@ -62,31 +96,55 @@ def record_detection_patterns(
     if r is not None:
         try:
             rk = _pattern_redis_key(sid)
+            sk = _samples_redis_key(sid)
+            existing_samples = r.hgetall(sk) or {}
             pipe = r.pipeline()
             for key, n in increments.items():
                 pipe.hincrby(rk, key, n)
+            for key, texts in samples_in.items():
+                bucket: list[str] = []
+                raw = existing_samples.get(key)
+                if raw:
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, list):
+                            bucket = [str(x) for x in parsed if x]
+                    except Exception:
+                        bucket = []
+                for t in texts:
+                    if t not in bucket:
+                        bucket.append(t)
+                pipe.hset(sk, key, json.dumps(bucket[-_MAX_SAMPLES_PER_KEY:], ensure_ascii=False))
             pipe.expire(rk, _PATTERN_TTL_SEC)
+            pipe.expire(sk, _PATTERN_TTL_SEC)
             pipe.execute()
-            # 裁剪低频键
             data = r.hgetall(rk) or {}
             if len(data) > _MAX_PATTERN_KEYS:
                 ranked = sorted(data.items(), key=lambda kv: int(kv[1] or 0), reverse=True)
                 drop = [k for k, _ in ranked[_MAX_PATTERN_KEYS:]]
                 if drop:
                     r.hdel(rk, *drop)
+                    r.hdel(sk, *drop)
             return
         except Exception as exc:
             logger.info("pattern redis write failed, fallback memory: %s", exc)
 
     with _hits_lock:
         c = _pattern_hits[sid]
+        buckets = _match_samples[sid]
         for key, n in increments.items():
             c[key] += n
+        for key, texts in samples_in.items():
+            bucket = buckets.setdefault(key, deque(maxlen=_MAX_SAMPLES_PER_KEY))
+            for t in texts:
+                if t not in bucket:
+                    bucket.append(t)
         if len(c) > _MAX_PATTERN_KEYS:
             keep = {k for k, _ in c.most_common(_MAX_PATTERN_KEYS)}
             for k in list(c.keys()):
                 if k not in keep:
                     del c[k]
+                    buckets.pop(k, None)
 
 
 def reset_detection_patterns(site_id: int | None = None) -> None:
@@ -100,6 +158,8 @@ def reset_detection_patterns(site_id: int | None = None) -> None:
             try:
                 for key in r.scan_iter(match="reddit:ai_patterns:v1:*", count=100):
                     r.delete(key)
+                for key in r.scan_iter(match="reddit:ai_samples:v1:*", count=100):
+                    r.delete(key)
             except Exception:
                 pass
         return
@@ -109,7 +169,7 @@ def reset_detection_patterns(site_id: int | None = None) -> None:
         _match_samples.pop(sid, None)
     if r is not None:
         try:
-            r.delete(_pattern_redis_key(sid))
+            r.delete(_pattern_redis_key(sid), _samples_redis_key(sid))
         except Exception:
             pass
 
@@ -122,21 +182,44 @@ def top_negative_examples(*, site_id: int | None, limit: int = 6) -> list[tuple[
     if r is not None:
         try:
             data = r.hgetall(_pattern_redis_key(sid)) or {}
+            samples_raw = r.hgetall(_samples_redis_key(sid)) or {}
             ranked = sorted(data.items(), key=lambda kv: int(kv[1] or 0), reverse=True)
-            return [(k, []) for k, _ in ranked[:limit]]
+            out: list[tuple[str, list[str]]] = []
+            for key, _ in ranked[:limit]:
+                samples: list[str] = []
+                raw = samples_raw.get(key)
+                if raw:
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, list):
+                            samples = [str(x) for x in parsed if x][:3]
+                    except Exception:
+                        samples = []
+                out.append((key, samples))
+            return out
         except Exception as exc:
             logger.info("pattern redis read failed, fallback memory: %s", exc)
     with _hits_lock:
-        return [(k, []) for k, _ in _pattern_hits.get(sid, Counter()).most_common(limit)]
+        buckets = _match_samples.get(sid, {})
+        return [
+            (key, list(buckets.get(key, ()))[:3])
+            for key, _ in _pattern_hits.get(sid, Counter()).most_common(limit)
+        ]
 
 
 def format_negative_examples_block(*, site_id: int | None, limit: int = 6) -> str:
+    if site_id is None:
+        logger.warning("format_negative_examples_block skipped: site_id is None")
+        return ""
     rows = top_negative_examples(site_id=site_id, limit=limit)
     if not rows:
         return ""
     lines = ["Hard avoid these AI patterns (from this site's recent drafts):"]
-    for key, _samples in rows:
-        lines.append(f"- {key}")
+    for key, samples in rows:
+        line = f"- {key}"
+        if samples:
+            line += f" (e.g. {', '.join(samples[:3])})"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -192,6 +275,13 @@ def format_community_examples_block(
     return "\n".join(lines)
 
 
+def _purge_expired_mem_examples(now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    dead = [k for k, (exp, _) in _mem_examples.items() if exp <= now]
+    for k in dead:
+        _mem_examples.pop(k, None)
+
+
 def _load_cached_examples(subreddit: str) -> list[dict[str, str]] | None:
     key = subreddit.lower().strip()
     r = _redis()
@@ -204,14 +294,19 @@ def _load_cached_examples(subreddit: str) -> list[dict[str, str]] | None:
                     return data
         except Exception:
             pass
+    now = time.time()
     hit = _mem_examples.get(key)
-    if hit and hit[0] > time.time():
-        return hit[1]
+    if hit:
+        if hit[0] > now:
+            return hit[1]
+        _mem_examples.pop(key, None)
+    _purge_expired_mem_examples(now)
     return None
 
 
 def _store_cached_examples(subreddit: str, examples: list[dict[str, str]]) -> None:
     key = subreddit.lower().strip()
+    _purge_expired_mem_examples()
     _mem_examples[key] = (time.time() + _EXAMPLES_TTL_SEC, examples)
     r = _redis()
     if r is None:

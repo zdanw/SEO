@@ -89,12 +89,16 @@ def generate_comment_pipeline(
     community_examples: list[dict[str, str]] | None = None,
     site_id: int | None = None,
 ) -> GeneratedComment:
+    if site_id is None:
+        logger.warning("generate_comment_pipeline called without site_id; pattern bank disabled")
+
     brands = []
     if product_brief and product_brief.get("brand"):
         brands.append(str(product_brief["brand"]))
     brief_for_model = product_brief if intent == "promo" else None
     url = site_url if intent == "promo" else None
     max_typos = 2 if intent == "casual" else 1
+    base_seed = 0 if seed is None else seed
 
     body = ""
     risk = "ok"
@@ -120,11 +124,6 @@ def generate_comment_pipeline(
             site_id=site_id,
         )
         rewrites = attempt
-        if intent == "casual" and casual_mentions_brand(body, brands):
-            brand_hits += 1
-            revision_notes = build_brand_revision_notes(brands)
-            risk = "brand_leak"
-            continue
 
         raw = body
         before = detect_ai_content(raw)
@@ -132,11 +131,11 @@ def generate_comment_pipeline(
         if score_before is None:
             score_before = before_score
         if before.verdict in {"mixed", "likely_ai"}:
-            record_detection_patterns(before.signs_of_ai, site_id=site_id)
+            record_detection_patterns(before.signs_of_ai, site_id=site_id, brand_names=brands)
 
         body = humanize_comment(
             raw,
-            seed=(0 if seed is None else seed) + attempt,
+            seed=base_seed + attempt,
             brand_names=tuple(brands),
             max_typos=max_typos,
         )
@@ -152,17 +151,24 @@ def generate_comment_pipeline(
                 before_score,
                 after_score,
             )
-        verdict = after.verdict
-        if verdict in {"mixed", "likely_ai"}:
-            record_detection_patterns(after.signs_of_ai, site_id=site_id)
+        if after.verdict in {"mixed", "likely_ai"}:
+            record_detection_patterns(after.signs_of_ai, site_id=site_id, brand_names=brands)
 
+        # 品牌闸放在 humanize 之后：半成品也已经真人化，审核看到的不是生肉 AI 稿
+        if intent == "casual" and casual_mentions_brand(body, brands):
+            brand_hits += 1
+            revision_notes = build_brand_revision_notes(brands)
+            risk = "brand_leak"
+            continue
+
+        verdict = after.verdict
         if verdict != "likely_ai":
             risk = _verdict_to_risk(verdict)
             break
         risk = "likely_ai"
         revision_notes = build_revision_notes(after)
     else:
-        if brand_hits >= 2 or (brand_hits and risk == "brand_leak" and not score_rounds):
+        if brand_hits >= 2 or (brand_hits and risk == "brand_leak"):
             risk = "brand_leak"
         elif risk != "brand_leak":
             risk = "likely_ai"

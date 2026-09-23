@@ -117,17 +117,25 @@ def test_pipeline_preserves_mixed_risk(monkeypatch):
     assert out.rewrite_count == 0
 
 
-def test_brand_gate_sets_notes_and_brand_leak_risk(monkeypatch):
+def test_brand_gate_humanizes_and_sets_brand_leak(monkeypatch):
     ai = _FakeAI()
     ai._bodies = [
         "We love Bebcare at night honestly.",
         "Bebcare saved our sleep schedule.",
     ]
+    humanized: list[str] = []
 
-    monkeypatch.setattr(
-        "app.services.reddit_content.detect_ai_content",
-        lambda *_: (_ for _ in ()).throw(AssertionError("should not detect on brand leak")),
-    )
+    def fake_detect(_text: str) -> AiDetectionResult:
+        return AiDetectionResult(score=Decimal("40"), verdict="mixed", engine="t")
+
+    def fake_humanize(text, **kw):
+        out = text + " :)"
+        humanized.append(out)
+        return out
+
+    monkeypatch.setattr("app.services.reddit_content.detect_ai_content", fake_detect)
+    monkeypatch.setattr("app.services.reddit_content.humanize_comment", fake_humanize)
+    monkeypatch.setattr("app.services.reddit_content.record_detection_patterns", lambda *a, **k: None)
 
     out = generate_comment_pipeline(
         ai,  # type: ignore[arg-type]
@@ -142,7 +150,11 @@ def test_brand_gate_sets_notes_and_brand_leak_risk(monkeypatch):
     assert len(ai.calls) == 2
     assert "Bebcare" in (ai.calls[1].get("revision_notes") or "")
     assert "ZERO brand" in (ai.calls[1].get("revision_notes") or "")
-    assert build_brand_revision_notes(["Bebcare"]).startswith("Your previous")
+    assert out.body.endswith(":)")
+    assert out.ai_score_before_humanize is not None
+    assert out.ai_score_after_humanize is not None
+    assert len(out.score_rounds) == 2
+    assert humanized
 
 
 def test_generate_comment_prompt_includes_revision(monkeypatch):

@@ -36,7 +36,7 @@ KARMA_FULL_THRESHOLD = 500
 # 内容查重阈值：与同站点近 7 天内容相似度超过该值视为模板化重复（含跨账号）
 SIMILARITY_THRESHOLD = 0.85
 DEDUP_WINDOW_DAYS = 7
-DEDUP_COMPARE_LIMIT = 60
+DEDUP_COMPARE_LIMIT = 200
 
 
 class RiskViolation(Exception):
@@ -151,8 +151,27 @@ def get_subreddit_daily_usage(db: Session, site_id: int, subreddit: str) -> int:
     )
 
 
+@dataclass
+class SimilarityHit:
+    other_id: int
+    account_id: int | None
+    ratio: float
+    message: str
+
+
 def _norm_text(text: str) -> str:
     return " ".join((text or "").lower().split())
+
+
+def _text_similarity(a: str, b: str) -> float:
+    """词级 + 字符级取较高值，减轻换词不换意漏检。"""
+    ta = _norm_text(a).split()
+    tb = _norm_text(b).split()
+    if not ta or not tb:
+        return 0.0
+    char_r = difflib.SequenceMatcher(None, " ".join(ta), " ".join(tb)).ratio()
+    tok_r = difflib.SequenceMatcher(None, ta, tb).ratio()
+    return max(char_r, tok_r)
 
 
 DEDUP_STATUSES = frozenset({"posted", "posting"})
@@ -166,7 +185,7 @@ def find_similar_on_site(
     body: str,
     exclude_id: int | None = None,
     kind_label: str = "内容",
-) -> str | None:
+) -> SimilarityHit | None:
     """站点级查重（矩阵号互相撞车也会拦）。仅已发布；按 published_at；最多比近 N 条。"""
     norm = _norm_text(body)
     if len(norm) < 40:
@@ -187,13 +206,19 @@ def find_similar_on_site(
     )
     for other in recent:
         other_body = getattr(other, "body", None) or ""
-        ratio = difflib.SequenceMatcher(None, norm, _norm_text(other_body)).ratio()
+        ratio = _text_similarity(norm, other_body)
         if ratio >= SIMILARITY_THRESHOLD:
             account = getattr(other, "account_id", None)
             acc_bit = f"，账号 #{account}" if account is not None else ""
-            return (
+            msg = (
                 f"{kind_label}与站点近期 #{other.id}{acc_bit} 相似度过高（{ratio:.0%}），"
                 f"疑似矩阵撞车/模板化重复，请改写后发布"
+            )
+            return SimilarityHit(
+                other_id=int(other.id),
+                account_id=int(account) if account is not None else None,
+                ratio=float(ratio),
+                message=msg,
             )
     return None
 
@@ -282,7 +307,7 @@ def check_post_publish(
         kind_label="内容",
     )
     if similar:
-        errors.append(similar)
+        errors.append(similar.message)
 
     return RiskReport(ok=not errors, errors=errors, warnings=warnings)
 
@@ -319,7 +344,7 @@ def check_comment_publish(
         kind_label="评论",
     )
     if similar:
-        errors.append(similar)
+        errors.append(similar.message)
 
     return RiskReport(ok=not errors, errors=errors, warnings=warnings)
 

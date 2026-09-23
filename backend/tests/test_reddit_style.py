@@ -5,6 +5,7 @@ from app.services.reddit_style import (
     format_negative_examples_block,
     pick_community_examples,
     record_detection_patterns,
+    redact_brand_text,
     reset_detection_patterns,
     with_negative_examples,
 )
@@ -30,7 +31,12 @@ def test_format_community_examples_block():
     assert "do NOT copy" in block
 
 
-def test_negative_examples_are_site_scoped(monkeypatch):
+def test_redact_brand_text():
+    assert "[brand]" in redact_brand_text("love Bebcare overnight", {"Bebcare"})
+    assert "Bebcare" not in redact_brand_text("love Bebcare overnight", {"Bebcare"})
+
+
+def test_negative_examples_are_site_scoped_with_redacted_samples(monkeypatch):
     monkeypatch.setattr("app.services.reddit_style._redis", lambda: None)
     reset_detection_patterns()
     record_detection_patterns(
@@ -44,6 +50,7 @@ def test_negative_examples_are_site_scoped(monkeypatch):
             ]
         },
         site_id=1,
+        brand_names=["Bebcare"],
     )
     record_detection_patterns(
         {
@@ -56,9 +63,11 @@ def test_negative_examples_are_site_scoped(monkeypatch):
     block1 = format_negative_examples_block(site_id=1)
     block2 = format_negative_examples_block(site_id=2)
     assert "em_dash_overuse" in block1
-    assert "Bebcare" not in block1  # 不注入原文，避免品牌泄漏
+    assert "[brand]" in block1
+    assert "Bebcare" not in block1
     assert "chatbot_phrase" not in block1
     assert "chatbot_phrase" in block2
+    assert "hope this helps" in block2
     assert "em_dash_overuse" not in block2
     system = with_negative_examples("BASE", site_id=1)
     assert system.startswith("BASE")
@@ -68,14 +77,16 @@ def test_negative_examples_are_site_scoped(monkeypatch):
     assert format_negative_examples_block(site_id=1) == ""
 
 
-def test_record_without_site_id_is_noop(monkeypatch):
+def test_record_without_site_id_is_noop(monkeypatch, caplog):
     monkeypatch.setattr("app.services.reddit_style._redis", lambda: None)
     reset_detection_patterns()
-    record_detection_patterns(
-        {"patterns": [{"key": "em_dash_overuse", "matches": ["—"]}]},
-        site_id=None,
-    )
+    with caplog.at_level("WARNING"):
+        record_detection_patterns(
+            {"patterns": [{"key": "em_dash_overuse", "matches": ["—"]}]},
+            site_id=None,
+        )
     assert format_negative_examples_block(site_id=1) == ""
+    assert any("site_id is None" in r.message for r in caplog.records)
 
 
 def test_fetch_community_examples_fail_soft():
@@ -89,7 +100,7 @@ def test_fetch_community_examples_fail_soft():
     assert fetch_community_examples(Boom(), "Parenting") == []
 
 
-def test_fetch_community_examples_caches(monkeypatch):
+def test_fetch_community_examples_caches_and_purges(monkeypatch):
     monkeypatch.setattr("app.services.reddit_style._redis", lambda: None)
     calls = {"n": 0}
 
@@ -98,7 +109,6 @@ def test_fetch_community_examples_caches(monkeypatch):
             calls["n"] += 1
             return [{"title": "t5", "body": "b5", "score": 50}]
 
-    # 清内存缓存
     from app.services import reddit_style as style
 
     style._mem_examples.clear()
@@ -106,6 +116,11 @@ def test_fetch_community_examples_caches(monkeypatch):
     b = fetch_community_examples(Ok(), "ParentingCacheTest", limit=1)
     assert a == b
     assert calls["n"] == 1
+
+    # 过期条目在读取时被清理
+    style._mem_examples["stale_sub"] = (0, [{"title": "old", "body": "x"}])
+    assert style._load_cached_examples("stale_sub") is None
+    assert "stale_sub" not in style._mem_examples
 
 
 def test_comment_prompt_includes_examples(monkeypatch):
@@ -135,4 +150,5 @@ def test_comment_prompt_includes_examples(monkeypatch):
     )
     assert "Anyone else exhausted" in captured["user"]
     assert "chatbot_phrase" in captured["system"]
+    assert "hope this helps" in captured["system"]
     reset_detection_patterns(site_id=9)
