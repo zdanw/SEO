@@ -12,3 +12,5 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+docs/
+优化建议/
