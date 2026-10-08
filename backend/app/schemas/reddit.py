@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, ConfigDict
@@ -157,6 +157,99 @@ class RedditPostUpdate(BaseModel):
 
 class RedditScheduleIn(BaseModel):
     scheduled_at: datetime
+
+
+# ============ 自动化 Campaign ============
+CampaignStatus = Literal["draft", "running", "paused", "ended"]
+CampaignMode = Literal["auto", "review"]
+CampaignActionType = Literal["post", "comment", "upvote_related", "upvote_self"]
+CampaignActionStatus = Literal["pending", "executing", "done", "failed", "skipped"]
+
+
+class RedditCampaignCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    start_date: date
+    end_date: date
+    active_hour_start: int = Field(default=0, ge=0, le=23)
+    active_hour_end: int = Field(default=23, ge=0, le=23)
+    content_mode: CampaignMode = "review"
+    daily_posts: int = Field(default=0, ge=0, le=20)
+    daily_comments: int = Field(default=0, ge=0, le=50)
+    daily_upvotes: int = Field(default=0, ge=0, le=100)
+    self_upvote_enabled: bool = False
+    self_upvote_delay_minutes: int = Field(default=240, ge=10, le=1440)
+    subreddits: list[str] = Field(default_factory=list, max_length=20)
+    account_ids: list[int] = Field(default_factory=list, max_length=50)
+    brand_id: Optional[int] = None
+    product_id: Optional[int] = None
+
+
+class RedditCampaignUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    active_hour_start: Optional[int] = Field(default=None, ge=0, le=23)
+    active_hour_end: Optional[int] = Field(default=None, ge=0, le=23)
+    content_mode: Optional[CampaignMode] = None
+    daily_posts: Optional[int] = Field(default=None, ge=0, le=20)
+    daily_comments: Optional[int] = Field(default=None, ge=0, le=50)
+    daily_upvotes: Optional[int] = Field(default=None, ge=0, le=100)
+    self_upvote_enabled: Optional[bool] = None
+    self_upvote_delay_minutes: Optional[int] = Field(default=None, ge=10, le=1440)
+    subreddits: Optional[list[str]] = Field(default=None, max_length=20)
+    account_ids: Optional[list[int]] = Field(default=None, max_length=50)
+    brand_id: Optional[int] = None
+    product_id: Optional[int] = None
+
+
+class RedditCampaignOut(BaseModel):
+    id: int
+    site_id: int
+    name: str
+    status: CampaignStatus
+    start_date: date
+    end_date: date
+    active_hour_start: int
+    active_hour_end: int
+    content_mode: CampaignMode
+    daily_posts: int
+    daily_comments: int
+    daily_upvotes: int
+    self_upvote_enabled: bool
+    self_upvote_delay_minutes: int
+    subreddits: list[str] = Field(default_factory=list)
+    account_ids: list[int] = Field(default_factory=list)
+    brand_id: Optional[int] = None
+    product_id: Optional[int] = None
+    # 今日执行进度（端点计算填充）
+    today_posts: int = 0
+    today_comments: int = 0
+    today_upvotes: int = 0
+    last_tick_at: Optional[datetime] = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RedditCampaignActionOut(BaseModel):
+    id: int
+    campaign_id: int
+    site_id: int
+    account_id: int
+    action_type: CampaignActionType
+    status: CampaignActionStatus
+    planned_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+    post_id: Optional[int] = None
+    comment_id: Optional[int] = None
+    target_thing_id: Optional[str] = None
+    target_post_url: Optional[str] = None
+    error_message: Optional[str] = None
+    skip_reason: Optional[str] = None
+    account_name: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
 
 
 class RedditPostOut(BaseModel):

@@ -676,6 +676,10 @@
           </el-table-column>
         </el-table>
       </el-tab-pane>
+
+      <el-tab-pane label="自动化 Campaign" name="campaigns">
+        <RedditCampaigns v-if="innerTab === 'campaigns'" />
+      </el-tab-pane>
     </el-tabs>
 
     <el-dialog v-model="rulesDialogVisible" :title="rulesDialogTitle" width="640px">
@@ -861,6 +865,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { QuestionFilled } from '@element-plus/icons-vue'
+import RedditCampaigns from './RedditCampaigns.vue'
 import {
   getRedditStatus,
   generateRedditPost, listRedditPosts, updateRedditPost, approveRedditPost, publishRedditPost, forceFailRedditPost, deleteRedditPost,

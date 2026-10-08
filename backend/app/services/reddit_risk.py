@@ -12,6 +12,7 @@ from __future__ import annotations
 import difflib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from sqlalchemy.orm import Session
 
@@ -101,7 +102,7 @@ def apply_role_defaults(profile: RedditAccountProfile) -> None:
 def mark_warning(db: Session, profile: RedditAccountProfile, reason: str) -> None:
     profile.risk_status = "warning"
     profile.risk_reason = reason
-    profile.last_warning_at = datetime.utcnow()
+    profile.last_warning_at = now_bj()
     db.commit()
 
 
@@ -114,7 +115,7 @@ def clear_warning(db: Session, profile: RedditAccountProfile) -> None:
 # ============ 频次统计 ============
 def get_account_daily_usage(db: Session, account_id: int) -> dict[str, int]:
     """统计账号当日（UTC）已发布的帖子 / 评论数量。"""
-    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = now_bj().replace(hour=0, minute=0, second=0, microsecond=0)
     posts = (
         db.query(RedditPost)
         .filter(
@@ -138,7 +139,7 @@ def get_account_daily_usage(db: Session, account_id: int) -> dict[str, int]:
 
 def get_subreddit_daily_usage(db: Session, site_id: int, subreddit: str) -> int:
     """统计当日（UTC）该站点在同一子版块已发布的帖子数。"""
-    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = now_bj().replace(hour=0, minute=0, second=0, microsecond=0)
     return (
         db.query(RedditPost)
         .filter(
@@ -190,7 +191,7 @@ def find_similar_on_site(
     norm = _norm_text(body)
     if len(norm) < 40:
         return None
-    week_ago = datetime.utcnow() - timedelta(days=DEDUP_WINDOW_DAYS)
+    week_ago = now_bj() - timedelta(days=DEDUP_WINDOW_DAYS)
     recent = (
         db.query(model)
         .filter(
@@ -272,7 +273,7 @@ def check_post_publish(
             warnings.append(f"r/{subreddit} 在社区库中已标记停用，建议换社区")
         if site_url and not community.allows_links:
             errors.append(f"r/{subreddit} 版规禁止外链，请去掉站点链接")
-        if site_url and community.promo_weekday is not None and community.promo_weekday != datetime.utcnow().weekday():
+        if site_url and community.promo_weekday is not None and community.promo_weekday != now_bj().weekday():
             weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
             errors.append(
                 f"r/{subreddit} 仅{weekdays[community.promo_weekday]}允许自推广，今日请发布无链接内容"
@@ -282,7 +283,7 @@ def check_post_publish(
 
     # 6) 外链规范：同一条链接不重复多发不同子版块（7 天窗口）
     if site_url:
-        week_ago = datetime.utcnow() - timedelta(days=DEDUP_WINDOW_DAYS)
+        week_ago = now_bj() - timedelta(days=DEDUP_WINDOW_DAYS)
         dup = (
             db.query(RedditPost)
             .filter(

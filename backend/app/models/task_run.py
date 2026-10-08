@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from app.core.timeutil import now_bj
 from typing import Any
 
 from sqlalchemy import DateTime, Integer, String, Text
@@ -23,7 +24,7 @@ class TaskRun(Base):
     business_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), default="started", nullable=False, index=True)
     started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False, index=True
+        DateTime(timezone=True), default=now_bj, nullable=False, index=True
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -74,7 +75,7 @@ def finish_task_run(
     if run is None:
         return
     run.status = status
-    run.finished_at = datetime.utcnow()
+    run.finished_at = now_bj()
     if error_message is not None:
         run.error_message = error_message[:2000]
     if meta_update:

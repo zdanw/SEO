@@ -501,3 +501,106 @@ export function upvoteRedditThing(payload: {
     { direction: 1, ...payload },
   )
 }
+
+// ============ 自动化 Campaign ============
+export type CampaignStatus = 'draft' | 'running' | 'paused' | 'ended'
+export type CampaignMode = 'auto' | 'review'
+export type CampaignActionType = 'post' | 'comment' | 'upvote_related' | 'upvote_self'
+export type CampaignActionStatus = 'pending' | 'executing' | 'done' | 'failed' | 'skipped'
+
+export interface RedditCampaign {
+  id: number
+  site_id: number
+  name: string
+  status: CampaignStatus
+  start_date: string
+  end_date: string
+  active_hour_start: number
+  active_hour_end: number
+  content_mode: CampaignMode
+  daily_posts: number
+  daily_comments: number
+  daily_upvotes: number
+  self_upvote_enabled: boolean
+  self_upvote_delay_minutes: number
+  subreddits: string[]
+  account_ids: number[]
+  brand_id?: number | null
+  product_id?: number | null
+  today_posts: number
+  today_comments: number
+  today_upvotes: number
+  last_tick_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface RedditCampaignAction {
+  id: number
+  campaign_id: number
+  site_id: number
+  account_id: number
+  action_type: CampaignActionType
+  status: CampaignActionStatus
+  planned_at?: string | null
+  executed_at?: string | null
+  post_id?: number | null
+  comment_id?: number | null
+  target_thing_id?: string | null
+  target_post_url?: string | null
+  error_message?: string | null
+  skip_reason?: string | null
+  account_name?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface RedditCampaignPayload {
+  name: string
+  start_date: string
+  end_date: string
+  active_hour_start: number
+  active_hour_end: number
+  content_mode: CampaignMode
+  daily_posts: number
+  daily_comments: number
+  daily_upvotes: number
+  self_upvote_enabled: boolean
+  self_upvote_delay_minutes: number
+  subreddits: string[]
+  account_ids: number[]
+  brand_id?: number | null
+  product_id?: number | null
+}
+
+export function listCampaigns() {
+  return http.get<any, RedditCampaign[]>('/reddit/automation/campaigns')
+}
+
+export function createCampaign(payload: RedditCampaignPayload) {
+  return http.post<any, RedditCampaign>('/reddit/automation/campaigns', payload)
+}
+
+export function updateCampaign(id: number, payload: Partial<RedditCampaignPayload>) {
+  return http.patch<any, RedditCampaign>(`/reddit/automation/campaigns/${id}`, payload)
+}
+
+export function deleteCampaign(id: number) {
+  return http.delete<any, void>(`/reddit/automation/campaigns/${id}`)
+}
+
+export function startCampaign(id: number) {
+  return http.post<any, RedditCampaign>(`/reddit/automation/campaigns/${id}/start`, {})
+}
+
+export function pauseCampaign(id: number) {
+  return http.post<any, RedditCampaign>(`/reddit/automation/campaigns/${id}/pause`, {})
+}
+
+export function listCampaignActions(id: number, params?: { status?: string; action_type?: string; limit?: number }) {
+  return http.get<any, RedditCampaignAction[]>(`/reddit/automation/campaigns/${id}/actions`, { params })
+}
+
+export function retryCampaignAction(actionId: number) {
+  return http.post<any, RedditCampaignAction>(`/reddit/automation/actions/${actionId}/retry`, {})
+}

@@ -1,4 +1,5 @@
 from datetime import datetime
+from app.core.timeutil import now_bj
 from sqlalchemy import Integer, String, Boolean, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,6 +17,6 @@ class User(Base):
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.utcnow,
+        default=now_bj,
         nullable=False,
     )

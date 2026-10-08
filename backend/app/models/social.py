@@ -1,4 +1,5 @@
 from datetime import datetime
+from app.core.timeutil import now_bj
 from sqlalchemy import Integer, String, DateTime, ForeignKey, Text, Boolean, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -23,7 +24,7 @@ class SocialAccount(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.utcnow,
+        default=now_bj,
         nullable=False,
     )
 
@@ -60,13 +61,13 @@ class SocialPost(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.utcnow,
+        default=now_bj,
         nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=now_bj,
+        onupdate=now_bj,
         nullable=False,
     )
 

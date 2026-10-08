@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from app.core.timeutil import now_bj
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func
@@ -38,7 +39,7 @@ def get_queue_health(
         "queues": queues,
         "alert_threshold": _QUEUE_ALERT_THRESHOLD,
         "alerts": alerts,
-        "checked_at": datetime.utcnow().isoformat(),
+        "checked_at": now_bj().isoformat(),
     }
 
 
@@ -59,7 +60,7 @@ def get_cost_snapshot(
     except Exception:
         cost = used * float(settings.SERP_EST_COST_PER_REQUEST)
 
-    week_ago = datetime.utcnow() - timedelta(days=7)
+    week_ago = now_bj() - timedelta(days=7)
     posts_total = (
         db.query(func.count(RedditPost.id))
         .filter(

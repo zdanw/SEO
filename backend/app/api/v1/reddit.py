@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
@@ -13,13 +14,17 @@ from app.core.database import get_db
 from app.models.reddit import (
     RedditAccountProfile,
     RedditBrand,
+    RedditCampaign,
+    RedditCampaignAction,
     RedditComment,
     RedditCommunity,
     RedditPost,
     RedditPostMetric,
     RedditProduct,
     RedditProductKeyword,
+    RedditVoteLog,
 )
+from app.models.social import SocialAccount
 from app.models.user import User
 from app.models.zernio_key import ZernioApiKey
 from app.schemas.reddit import (
@@ -27,6 +32,10 @@ from app.schemas.reddit import (
     RedditBrandIn,
     RedditBrandOut,
     RedditBrandUpdate,
+    RedditCampaignActionOut,
+    RedditCampaignCreate,
+    RedditCampaignOut,
+    RedditCampaignUpdate,
     RedditCommentBatchGenerateIn,
     RedditCommentGenerateIn,
     RedditCommentOut,
@@ -736,6 +745,15 @@ def approve_post(
     if post.status not in ("pending_review", "draft", "approved"):
         raise HTTPException(status_code=400, detail="当前状态不可批准")
     post.status = "approved"
+    if post.campaign_id and post.scheduled_at is None:
+        # campaign 内容：批准即按动作计划时间自动定时，保留活跃窗口内的随机分布
+        action = (
+            db.query(RedditCampaignAction)
+            .filter(RedditCampaignAction.post_id == post.id, RedditCampaignAction.action_type == "post")
+            .first()
+        )
+        if action and action.planned_at and action.planned_at > now_bj():
+            post.scheduled_at = action.planned_at
     db.commit()
     db.refresh(post)
     return _fill_post_out(post)
@@ -788,6 +806,8 @@ def publish_post(
         raise _mix_http(exc) from exc
     except RiskViolation as exc:
         raise _risk_http(exc) from exc
+    except RedditApiError as exc:
+        _raise_reddit_upstream(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _fill_post_out(post)
@@ -823,7 +843,7 @@ def schedule_post(
         raise HTTPException(status_code=404, detail="发帖任务不存在")
     if post.status != "approved":
         raise HTTPException(status_code=400, detail="请先批准后再设置定时发布")
-    if payload.scheduled_at <= datetime.utcnow():
+    if payload.scheduled_at <= now_bj():
         raise HTTPException(status_code=400, detail="定时时间必须晚于当前时间")
     post.scheduled_at = payload.scheduled_at
     db.commit()
@@ -1054,6 +1074,15 @@ def approve_comment(
     if comment.status not in ("pending_review", "draft", "approved"):
         raise HTTPException(status_code=400, detail="当前状态不可批准")
     comment.status = "approved"
+    if comment.campaign_id and comment.scheduled_at is None:
+        # campaign 内容：批准即按动作计划时间自动定时，保留活跃窗口内的随机分布
+        action = (
+            db.query(RedditCampaignAction)
+            .filter(RedditCampaignAction.comment_id == comment.id, RedditCampaignAction.action_type == "comment")
+            .first()
+        )
+        if action and action.planned_at and action.planned_at > now_bj():
+            comment.scheduled_at = action.planned_at
     db.commit()
     db.refresh(comment)
     return _fill_comment_out(db, comment)
@@ -1118,6 +1147,8 @@ def publish_comment(
         raise _mix_http(exc) from exc
     except RiskViolation as exc:
         raise _risk_http(exc) from exc
+    except RedditApiError as exc:
+        _raise_reddit_upstream(exc)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _fill_comment_out(db, comment)
@@ -1159,7 +1190,7 @@ def schedule_comment(
         raise HTTPException(status_code=404, detail="评论任务不存在")
     if comment.status != "approved":
         raise HTTPException(status_code=400, detail="请先批准后再设置定时发布")
-    if payload.scheduled_at <= datetime.utcnow():
+    if payload.scheduled_at <= now_bj():
         raise HTTPException(status_code=400, detail="定时时间必须晚于当前时间")
     comment.scheduled_at = payload.scheduled_at
     db.commit()
@@ -1347,7 +1378,7 @@ def discover_search(
 
 def _remaining_comment_slots(db: Session, site_id: int, account_id: int) -> int:
     profile = get_or_create_profile(db, site_id, account_id)
-    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    day_start = now_bj().replace(hour=0, minute=0, second=0, microsecond=0)
     used = (
         db.query(RedditComment)
         .filter(
@@ -1996,7 +2027,7 @@ def sync_post_metrics(
                 post_id=post.id,
                 score=int(match.get("score", 0)),
                 num_comments=int(match.get("num_comments", 0)),
-                synced_at=datetime.utcnow(),
+                synced_at=now_bj(),
             )
         )
         db.commit()
@@ -2014,8 +2045,8 @@ def reddit_overview(
     db: Session = Depends(get_db),
     ctx: SiteContext = Depends(get_site_context),
 ) -> RedditOverviewOut:
-    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    week_ago = datetime.utcnow() - timedelta(days=7)
+    day_start = now_bj().replace(hour=0, minute=0, second=0, microsecond=0)
+    week_ago = now_bj() - timedelta(days=7)
 
     def _count(model, *conditions):
         return db.query(model).filter(*conditions).count()
@@ -2105,3 +2136,236 @@ def reddit_overview(
             RedditComment.ai_risk == "likely_ai",
         ),
     )
+
+
+# ============ 自动化 Campaign ============
+def _campaign_or_404(db: Session, ctx: SiteContext, campaign_id: int) -> RedditCampaign:
+    row = (
+        db.query(RedditCampaign)
+        .filter(RedditCampaign.id == campaign_id, RedditCampaign.site_id == ctx.site.id)
+        .first()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Campaign 不存在")
+    return row
+
+
+def _campaign_out(db: Session, campaign: RedditCampaign) -> RedditCampaignOut:
+    from app.services.reddit_campaign import _quota_used
+
+    out = RedditCampaignOut.model_validate(campaign)
+    quota = _quota_used(db, campaign.id, now_bj())
+    out.today_posts = quota["posts"]
+    out.today_comments = quota["comments"]
+    out.today_upvotes = quota["upvotes"]
+    return out
+
+
+def _normalize_campaign_subreddits(subreddits: list[str] | None) -> list[str]:
+    from app.services.reddit_client import normalize_subreddit
+
+    seen: list[str] = []
+    for s in subreddits or []:
+        name = normalize_subreddit(s)
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _validate_campaign_accounts(db: Session, ctx: SiteContext, account_ids: list[int] | None) -> None:
+    for aid in account_ids or []:
+        try:
+            reddit_oauth.get_site_account(db, ctx.site.id, aid)
+        except HTTPException:
+            raise HTTPException(status_code=400, detail=f"Reddit 账号 #{aid} 不存在或不属于本站")
+
+
+def _validate_campaign_product(db: Session, ctx: SiteContext, product_id: int | None, brand_id: int | None) -> None:
+    if product_id:
+        product = db.get(RedditProduct, product_id)
+        if not product:
+            raise HTTPException(status_code=404, detail="产品不存在")
+        brand = db.get(RedditBrand, product.brand_id)
+        if not brand or brand.site_id != ctx.site.id:
+            raise HTTPException(status_code=400, detail="产品不属于本站品牌")
+    if brand_id:
+        brand = db.get(RedditBrand, brand_id)
+        if not brand or brand.site_id != ctx.site.id:
+            raise HTTPException(status_code=400, detail="品牌不属于本站")
+
+
+def _validate_campaign_dates(start, end) -> None:
+    if end < start:
+        raise HTTPException(status_code=400, detail="结束日期不能早于开始日期")
+
+
+@router.get("/automation/campaigns", response_model=list[RedditCampaignOut])
+def list_automation_campaigns(
+    db: Session = Depends(get_db), ctx: SiteContext = Depends(get_site_context)
+):
+    rows = (
+        db.query(RedditCampaign)
+        .filter(RedditCampaign.site_id == ctx.site.id)
+        .order_by(RedditCampaign.id.desc())
+        .all()
+    )
+    return [_campaign_out(db, row) for row in rows]
+
+
+@router.post("/automation/campaigns", response_model=RedditCampaignOut, status_code=201)
+def create_automation_campaign(
+    payload: RedditCampaignCreate,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    _validate_campaign_dates(payload.start_date, payload.end_date)
+    _validate_campaign_accounts(db, ctx, payload.account_ids)
+    _validate_campaign_product(db, ctx, payload.product_id, payload.brand_id)
+    data = payload.model_dump()
+    data["subreddits"] = _normalize_campaign_subreddits(data.get("subreddits"))
+    campaign = RedditCampaign(site_id=ctx.site.id, **data)
+    db.add(campaign)
+    db.commit()
+    db.refresh(campaign)
+    return _campaign_out(db, campaign)
+
+
+@router.get("/automation/campaigns/{campaign_id}", response_model=RedditCampaignOut)
+def get_automation_campaign(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(get_site_context),
+):
+    return _campaign_out(db, _campaign_or_404(db, ctx, campaign_id))
+
+
+@router.patch("/automation/campaigns/{campaign_id}", response_model=RedditCampaignOut)
+def update_automation_campaign(
+    campaign_id: int,
+    payload: RedditCampaignUpdate,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    campaign = _campaign_or_404(db, ctx, campaign_id)
+    data = payload.model_dump(exclude_unset=True)
+    if "subreddits" in data:
+        data["subreddits"] = _normalize_campaign_subreddits(data["subreddits"])
+    if "account_ids" in data:
+        _validate_campaign_accounts(db, ctx, data["account_ids"])
+    if "product_id" in data or "brand_id" in data:
+        _validate_campaign_product(
+            db,
+            ctx,
+            data.get("product_id", campaign.product_id),
+            data.get("brand_id", campaign.brand_id),
+        )
+    for key, value in data.items():
+        setattr(campaign, key, value)
+    _validate_campaign_dates(campaign.start_date, campaign.end_date)
+    db.commit()
+    db.refresh(campaign)
+    return _campaign_out(db, campaign)
+
+
+@router.delete("/automation/campaigns/{campaign_id}", status_code=204)
+def delete_automation_campaign(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    campaign = _campaign_or_404(db, ctx, campaign_id)
+    db.delete(campaign)
+    db.commit()
+
+
+@router.post("/automation/campaigns/{campaign_id}/start", response_model=RedditCampaignOut)
+def start_automation_campaign(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    campaign = _campaign_or_404(db, ctx, campaign_id)
+    if campaign.status == "ended":
+        raise HTTPException(status_code=400, detail="Campaign 已结束")
+    if campaign.end_date < now_bj().date():
+        raise HTTPException(status_code=400, detail="结束日期已过，请先延长日期区间")
+    campaign.status = "running"
+    db.commit()
+    db.refresh(campaign)
+    return _campaign_out(db, campaign)
+
+
+@router.post("/automation/campaigns/{campaign_id}/pause", response_model=RedditCampaignOut)
+def pause_automation_campaign(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    campaign = _campaign_or_404(db, ctx, campaign_id)
+    if campaign.status != "running":
+        raise HTTPException(status_code=400, detail="仅运行中的 Campaign 可暂停")
+    campaign.status = "paused"
+    db.commit()
+    db.refresh(campaign)
+    return _campaign_out(db, campaign)
+
+
+@router.get("/automation/campaigns/{campaign_id}/actions", response_model=list[RedditCampaignActionOut])
+def list_campaign_actions(
+    campaign_id: int,
+    status: Optional[str] = None,
+    action_type: Optional[str] = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(get_site_context),
+):
+    _campaign_or_404(db, ctx, campaign_id)
+    q = db.query(RedditCampaignAction).filter(RedditCampaignAction.campaign_id == campaign_id)
+    if status:
+        q = q.filter(RedditCampaignAction.status == status)
+    if action_type:
+        q = q.filter(RedditCampaignAction.action_type == action_type)
+    rows = q.order_by(RedditCampaignAction.id.desc()).limit(limit).all()
+    names = {
+        row[0]: row[1]
+        for row in db.query(SocialAccount.id, SocialAccount.account_name)
+        .filter(SocialAccount.site_id == ctx.site.id)
+        .all()
+    }
+    out = []
+    for row in rows:
+        item = RedditCampaignActionOut.model_validate(row)
+        item.account_name = names.get(row.account_id)
+        out.append(item)
+    return out
+
+
+@router.post("/automation/actions/{action_id}/retry", response_model=RedditCampaignActionOut)
+def retry_campaign_action(
+    action_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    action = db.get(RedditCampaignAction, action_id)
+    if not action:
+        raise HTTPException(status_code=404, detail="动作记录不存在")
+    campaign = (
+        db.query(RedditCampaign)
+        .filter(
+            RedditCampaign.id == action.campaign_id,
+            RedditCampaign.site_id == ctx.site.id,
+        )
+        .first()
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="动作记录不存在")
+    if action.status != "failed":
+        raise HTTPException(status_code=400, detail="仅失败的动作可重试")
+    action.status = "pending"
+    action.error_message = None
+    db.commit()
+    db.refresh(action)
+    item = RedditCampaignActionOut.model_validate(action)
+    account = db.get(SocialAccount, action.account_id)
+    item.account_name = account.account_name if account else None
+    return item

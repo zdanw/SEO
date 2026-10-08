@@ -1,4 +1,5 @@
 from datetime import datetime
+from app.core.timeutil import now_bj
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -25,7 +26,7 @@ class SiteMember(Base):
     role: Mapped[str] = mapped_column(String(20), default="operator", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.utcnow,
+        default=now_bj,
         nullable=False,
     )
 

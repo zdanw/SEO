@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, text
@@ -29,8 +30,8 @@ def get_summary(
     ctx: SiteContext = Depends(get_site_context),
 ):
     site_id = ctx.site.id
-    start = datetime.utcnow() - timedelta(days=days)
-    prev_start = datetime.utcnow() - timedelta(days=days * 2)
+    start = now_bj() - timedelta(days=days)
+    prev_start = now_bj() - timedelta(days=days * 2)
     prev_end = start
 
     active_kws = (
@@ -155,7 +156,7 @@ def get_rank_trends(
     ctx: SiteContext = Depends(get_site_context),
 ):
     site_id = ctx.site.id
-    start = datetime.utcnow() - timedelta(days=days)
+    start = now_bj() - timedelta(days=days)
 
     if keyword_ids.strip():
         ids = [int(x) for x in keyword_ids.split(",") if x.strip()]

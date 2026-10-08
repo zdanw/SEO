@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import text
@@ -74,7 +75,7 @@ def get_trends(
     ctx: SiteContext = Depends(get_site_context),
 ):
     ids = [int(x) for x in keyword_ids.split(",") if x.strip()]
-    start = datetime.utcnow() - timedelta(days=days)
+    start = now_bj() - timedelta(days=days)
     valid_ids = {
         k.id
         for k in db.query(Keyword.id)

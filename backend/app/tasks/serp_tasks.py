@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from app.core.timeutil import now_bj
 
 from app.core.celery_app import celery_app
 from app.core.config import settings
@@ -76,7 +77,7 @@ def crawl_keyword_rank(self, keyword_id: int, request_id: str | None = None) -> 
             finish_task_run(db, run, status="failed", error_message=str(e))
             raise
 
-        now = datetime.utcnow()
+        now = now_bj()
         snapshot = SerpRankSnapshot(
             time=now,
             keyword_id=kw.id,

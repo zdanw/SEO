@@ -21,6 +21,7 @@ from typing import Optional
 import httpx
 
 from app.core.config import settings
+from app.core.timeutil import now_bj
 from app.services.serp_provider import (
     SERPProvider,
     SerpFetchResult,
@@ -301,7 +302,7 @@ class SerpCrawler:
     def _mock_crawl(
         self, keyword: str, target_url: Optional[str], region: str, language: str
     ) -> SerpFetchResult:
-        today = datetime.utcnow().strftime("%Y-%m-%d")
+        today = now_bj().strftime("%Y-%m-%d")
         seed_str = f"{keyword}|{today}|{region}"
         seed = int(hashlib.md5(seed_str.encode()).hexdigest(), 16)
         rng = random.Random(seed)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from sqlalchemy import func
 
@@ -18,7 +19,7 @@ def check_serp_failures() -> dict:
     """每日执行：统计 SERP 抓取失败率。"""
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = now_bj()
         yesterday = now - timedelta(days=1)
         total = (
             db.query(func.count(SerpRankSnapshot.time))

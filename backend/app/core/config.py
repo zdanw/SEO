@@ -2,10 +2,19 @@
 from __future__ import annotations
 
 from typing import Optional
+from urllib.parse import unquote, urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_WEAK_SECRET_MARKERS = ("change-me", "please-change", "123456")
+_WEAK_SECRET_MARKERS = (
+    "change-me",
+    "please-change",
+    "123456",
+    "seo_dev_pass",
+    "seo_dev_redis",
+    "password",
+    "secret",
+)
 
 
 class Settings(BaseSettings):
@@ -111,6 +120,26 @@ class Settings(BaseSettings):
             return [o.strip() for o in raw.split(",") if o.strip()]
         return [self.FRONTEND_URL.rstrip("/")]
 
+    @staticmethod
+    def _is_weak_credential(value: Optional[str]) -> bool:
+        """空值、过短（<8）或包含默认占位符均视为弱凭证。"""
+        v = (value or "").strip()
+        if not v or len(v) < 8:
+            return True
+        return any(m in v.lower() for m in _WEAK_SECRET_MARKERS)
+
+    @staticmethod
+    def _url_credential(url: Optional[str]) -> Optional[str]:
+        """从连接串提取密码；无密码返回 None。"""
+        if not url:
+            return None
+        try:
+            parsed = urlparse(url.strip())
+        except ValueError:
+            return None
+        raw = parsed.password
+        return unquote(raw) if raw else None
+
     def validate_production(self) -> None:
         if self.is_dev:
             return
@@ -120,6 +149,28 @@ class Settings(BaseSettings):
         key = self.SECRET_KEY or ""
         if len(key) < 32 or any(m in key.lower() for m in _WEAK_SECRET_MARKERS):
             errors.append("生产环境须设置长度≥32 且非默认占位符的 SECRET_KEY")
+
+        # 数据库凭证
+        if self._is_weak_credential(self.DB_PASSWORD):
+            errors.append("生产环境须设置强 DB_PASSWORD（≥8位，非默认/占位符）")
+        db_url_password = self._url_credential(self.DATABASE_URL)
+        if self._is_weak_credential(db_url_password):
+            errors.append("生产环境 DATABASE_URL 中的数据库密码过弱或缺失")
+
+        # Redis / Celery 凭证
+        if self._is_weak_credential(self.REDIS_PASSWORD):
+            errors.append("生产环境须设置强 REDIS_PASSWORD")
+        for field, url in (
+            ("CELERY_BROKER_URL", self.CELERY_BROKER_URL),
+            ("CELERY_RESULT_BACKEND", self.CELERY_RESULT_BACKEND),
+        ):
+            if self._is_weak_credential(self._url_credential(url)):
+                errors.append(f"生产环境 {field} 中的 Redis 密码过弱或缺失")
+
+        # CORS 不允许通配符
+        if "*" in self.cors_origins_list():
+            errors.append("生产环境 CORS 不允许使用 *，请配置 CORS_ORIGINS 白名单")
+
         if errors:
             raise RuntimeError("生产配置校验失败：" + "；".join(errors))
 

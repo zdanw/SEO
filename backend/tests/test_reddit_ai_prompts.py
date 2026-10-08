@@ -1,10 +1,24 @@
 """Reddit 生成走社区口吻 system prompt，人设评论不读产品简报。"""
 from app.services.ai_writer import (
-    DeepSeekClient,
+    REDDIT_AUTO_PROMPT,
     REDDIT_COMMENT_PROMPT,
-    REDDIT_CONSULTATION_PROMPT,
+    REDDIT_GUIDE_PROMPT,
+    REDDIT_HELP_SEEK_PROMPT,
+    REDDIT_PITFALL_PROMPT,
     REDDIT_POST_SYSTEM_PROMPT,
     REDDIT_SYSTEM_PROMPT,
+    REDDIT_UNPOPULAR_PROMPT,
+    REDDIT_VENT_PROMPT,
+    DeepSeekClient,
+)
+
+REDDIT_POST_TYPE_PROMPTS = (
+    REDDIT_AUTO_PROMPT,
+    REDDIT_PITFALL_PROMPT,
+    REDDIT_VENT_PROMPT,
+    REDDIT_UNPOPULAR_PROMPT,
+    REDDIT_GUIDE_PROMPT,
+    REDDIT_HELP_SEEK_PROMPT,
 )
 
 
@@ -53,8 +67,17 @@ def test_prompts_prefer_casual_over_structured_guides():
     assert "no tl;dr" in post_sys
     assert "em dash" in post_sys
     assert "25-80" in REDDIT_COMMENT_PROMPT
-    assert "NO numbered lists" in REDDIT_CONSULTATION_PROMPT
-    assert "80-180" in REDDIT_CONSULTATION_PROMPT
-    for text in (REDDIT_SYSTEM_PROMPT, REDDIT_POST_SYSTEM_PROMPT, REDDIT_COMMENT_PROMPT, REDDIT_CONSULTATION_PROMPT):
+    # 列表禁令覆盖主要叙事型模板（guide 模板显式允许清单，属预期例外）
+    for name, template in (
+        ("vent", REDDIT_VENT_PROMPT),
+        ("unpopular", REDDIT_UNPOPULAR_PROMPT),
+        ("auto", REDDIT_AUTO_PROMPT),
+        ("pitfall", REDDIT_PITFALL_PROMPT),
+    ):
+        lowered = template.lower()
+        assert "no bullet lists" in lowered or "no numbered lists" in lowered or "no lists" in lowered, name
+    # 输出格式类 system/comment 提示禁止 em/en dash
+    # （post 模板正文含说明性破折号，属指令文本，不在检查范围）
+    for text in (REDDIT_SYSTEM_PROMPT, REDDIT_POST_SYSTEM_PROMPT, REDDIT_COMMENT_PROMPT):
         assert "\u2014" not in text
         assert "\u2013" not in text

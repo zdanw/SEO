@@ -9,6 +9,7 @@ from datetime import date, datetime
 from typing import Optional, Protocol
 
 from app.core.config import settings
+from app.core.timeutil import now_bj
 from app.utils.rate_limiter import get_redis
 
 # 统一状态语义：rank=NULL 时不得假装成「第 100 名」
@@ -43,7 +44,7 @@ class SerpFetchResult:
     estimated_cost: Optional[float] = None
     language: str = "en"
     device: str = "desktop"
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    fetched_at: datetime = field(default_factory=now_bj)
     raw_truncated: Optional[str] = None
 
 

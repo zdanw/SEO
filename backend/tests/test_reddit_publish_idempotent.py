@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services import reddit_publish as pub
-from app.services.reddit_client import RedditApiError
+from app.services.reddit_client import RedditActionRetryable, RedditApiError
 
 
 def _post(**kwargs):
@@ -127,3 +128,65 @@ def test_comment_repair_skips_api(db):
         out = pub.publish_comment_now(db, comment, skip_risk_check=True)
     get_client.assert_not_called()
     assert out.status == "posted"
+
+
+# ============ 限流自动重试 ============
+def test_post_rate_limited_reschedules_and_raises(db):
+    post = _post(status="approved")
+    client = MagicMock()
+    client.submit_post.side_effect = RedditApiError("too fast", status_code=429, retry_after=10)
+    with (
+        patch.object(pub, "enforce_publish_mix_quota"),
+        patch.object(pub, "_claim_post", return_value=True),
+        patch.object(pub, "get_reddit_client_for_account", return_value=client),
+    ):
+        with pytest.raises(RedditActionRetryable) as exc_info:
+            pub.publish_post_now(db, post, skip_risk_check=True)
+    assert exc_info.value.retry_after >= 30
+    assert post.status == "approved"  # 回队列，定时扫描可兜底重试
+    assert post.scheduled_at is not None and post.scheduled_at > datetime.utcnow()
+    assert "限流(429)" in post.error_message
+
+
+def test_post_breaker_open_waits_half_open_window(db):
+    post = _post(status="approved")
+    client = MagicMock()
+    client.submit_post.side_effect = RedditApiError("breaker", status_code=503)
+    with (
+        patch.object(pub, "enforce_publish_mix_quota"),
+        patch.object(pub, "_claim_post", return_value=True),
+        patch.object(pub, "get_reddit_client_for_account", return_value=client),
+    ):
+        with pytest.raises(RedditActionRetryable) as exc_info:
+            pub.publish_post_now(db, post, skip_risk_check=True)
+    assert exc_info.value.retry_after >= 600  # 熔断 open 600s，等半开窗口
+
+
+def test_post_rate_limited_exhausted_marks_failed(db):
+    post = _post(status="approved")
+    client = MagicMock()
+    client.submit_post.side_effect = RedditApiError("still limited", status_code=429, retry_after=60)
+    with (
+        patch.object(pub, "enforce_publish_mix_quota"),
+        patch.object(pub, "_claim_post", return_value=True),
+        patch.object(pub, "get_reddit_client_for_account", return_value=client),
+    ):
+        out = pub.publish_post_now(db, post, skip_risk_check=True, attempt=2)
+    assert out.status == "failed"
+    assert "still limited" in out.error_message
+
+
+def test_comment_rate_limited_reschedules_and_raises(db):
+    comment = _comment(status="approved")
+    client = MagicMock()
+    client.submit_comment.side_effect = RedditApiError("slow down", status_code=429, retry_after=10)
+    with (
+        patch.object(pub, "enforce_publish_mix_quota"),
+        patch.object(pub, "_claim_comment", return_value=True),
+        patch.object(pub, "get_reddit_client_for_account", return_value=client),
+    ):
+        with pytest.raises(RedditActionRetryable) as exc_info:
+            pub.publish_comment_now(db, comment, skip_risk_check=True)
+    assert exc_info.value.retry_after >= 30
+    assert comment.status == "approved"
+    assert comment.scheduled_at is not None and comment.scheduled_at > datetime.utcnow()

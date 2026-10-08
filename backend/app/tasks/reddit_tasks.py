@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.orm import Session
@@ -81,9 +82,12 @@ def _mark_comment_timeout(db: Session, comment_id: int) -> None:
     name="app.tasks.reddit_tasks.publish_reddit_post_by_id",
     soft_time_limit=_PUBLISH_SOFT_LIMIT,
     time_limit=_PUBLISH_HARD_LIMIT,
+    max_retries=2,
 )
-def publish_reddit_post_by_id(post_id: int) -> dict:
-    """单条帖子发布；软超时后记 failed，不清空正文。"""
+def publish_reddit_post_by_id(self, post_id: int) -> dict:
+    """单条帖子发布；429 限流/503 熔断按 retry_after 延迟重试，耗尽标 failed。"""
+    from app.services.reddit_client import RedditActionRetryable
+
     db: Session = SessionLocal()
     run = None
     try:
@@ -100,7 +104,19 @@ def publish_reddit_post_by_id(post_id: int) -> dict:
             site_id=post.site_id,
         )
         try:
-            publish_post_now(db, post)
+            publish_post_now(db, post, attempt=self.request.retries)
+        except RedditActionRetryable as exc:
+            db.rollback()
+            finish_task_run(
+                db, run, status="failed", error_message=f"限流，{exc.retry_after}s 后自动重试"
+            )
+            logger.warning(
+                "Publish post #%s rate-limited, auto retry %d/2 in %ss",
+                post_id,
+                exc.attempt + 1,
+                exc.retry_after,
+            )
+            raise self.retry(exc=exc, countdown=exc.retry_after) from exc
         except SoftTimeLimitExceeded:
             db.rollback()
             _mark_post_timeout(db, post_id)
@@ -124,9 +140,12 @@ def publish_reddit_post_by_id(post_id: int) -> dict:
     name="app.tasks.reddit_tasks.publish_reddit_comment_by_id",
     soft_time_limit=_PUBLISH_SOFT_LIMIT,
     time_limit=_PUBLISH_HARD_LIMIT,
+    max_retries=2,
 )
-def publish_reddit_comment_by_id(comment_id: int) -> dict:
-    """单条评论发布；软超时后记 failed。"""
+def publish_reddit_comment_by_id(self, comment_id: int) -> dict:
+    """单条评论发布；429 限流/503 熔断按 retry_after 延迟重试，耗尽标 failed。"""
+    from app.services.reddit_client import RedditActionRetryable
+
     db: Session = SessionLocal()
     run = None
     try:
@@ -143,7 +162,19 @@ def publish_reddit_comment_by_id(comment_id: int) -> dict:
             site_id=comment.site_id,
         )
         try:
-            publish_comment_now(db, comment)
+            publish_comment_now(db, comment, attempt=self.request.retries)
+        except RedditActionRetryable as exc:
+            db.rollback()
+            finish_task_run(
+                db, run, status="failed", error_message=f"限流，{exc.retry_after}s 后自动重试"
+            )
+            logger.warning(
+                "Publish comment #%s rate-limited, auto retry %d/2 in %ss",
+                comment_id,
+                exc.attempt + 1,
+                exc.retry_after,
+            )
+            raise self.retry(exc=exc, countdown=exc.retry_after) from exc
         except SoftTimeLimitExceeded:
             db.rollback()
             _mark_comment_timeout(db, comment_id)
@@ -185,7 +216,7 @@ def publish_scheduled_reddit_content() -> dict:
     skipped_posts = 0
     skipped_comments = 0
     try:
-        now = datetime.utcnow()
+        now = now_bj()
         posts = (
             db.query(RedditPost.id)
             .filter(
@@ -242,7 +273,7 @@ def sync_reddit_post_metrics(days: int = 30) -> dict:
     db: Session = SessionLocal()
     synced = 0
     try:
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = now_bj() - timedelta(days=days)
         posts = (
             db.query(RedditPost)
             .filter(
@@ -275,7 +306,7 @@ def sync_reddit_post_metrics(days: int = 30) -> dict:
                         post_id=post.id,
                         score=int(match.get("score", 0)),
                         num_comments=int(match.get("num_comments", 0)),
-                        synced_at=datetime.utcnow(),
+                        synced_at=now_bj(),
                     )
                 )
                 synced += 1
@@ -301,7 +332,7 @@ def reddit_account_health_check(min_posts: int = 3) -> dict:
     warned = 0
     recovered = 0
     try:
-        week_ago = datetime.utcnow() - timedelta(days=7)
+        week_ago = now_bj() - timedelta(days=7)
         profiles = db.query(RedditAccountProfile).all()
         for profile in profiles:
             usage = get_account_daily_usage(db, profile.account_id)

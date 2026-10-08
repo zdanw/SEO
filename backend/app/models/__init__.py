@@ -8,12 +8,15 @@ from app.models.serp_rank import SerpRankSnapshot  # noqa: F401
 from app.models.reddit import (  # noqa: F401
     RedditAccountProfile,
     RedditBrand,
+    RedditCampaign,
+    RedditCampaignAction,
     RedditComment,
     RedditCommunity,
     RedditPost,
     RedditPostMetric,
     RedditProduct,
     RedditProductKeyword,
+    RedditVoteLog,
 )
 from app.models.zernio_key import ZernioApiKey  # noqa: F401
 from app.models.task_run import TaskRun  # noqa: F401

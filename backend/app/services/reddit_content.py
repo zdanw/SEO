@@ -1,8 +1,14 @@
-"""评论生成流水线：AI 写稿 → 真人化 → AI 检测（失败则带诊断重写）。"""
+"""内容生成流水线：AI 写稿 → 真人化 → AI 检测（失败则带诊断重写）。
+
+- generate_comment_pipeline: 评论生成（API 与 Campaign 共用）
+- generate_post_content: 帖子生成核心（API 与 Campaign 共用），只生成不落库
+"""
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+
+from sqlalchemy.orm import Session
 
 from app.services.ai_detector import AiDetectionResult, detect_ai_content
 from app.services.ai_writer import DeepSeekClient
@@ -181,3 +187,129 @@ def generate_comment_pipeline(
         ai_score_after_humanize=score_after,
         score_rounds=score_rounds,
     )
+
+
+def _product_brief(brand, product) -> dict:
+    """产品卖点 brief（与 API 层 _brief_from_product 同构）。"""
+    return {
+        "brand": brand.name or "",
+        "product": product.name or "",
+        "category": product.category or "",
+        "description": (product.description or "").strip(),
+        "talking_points": product.talking_points or [],
+        "competitors": [],
+        "never_claim": "",
+    }
+
+
+def generate_post_content(
+    db: Session,
+    *,
+    site,
+    account,
+    subreddit: str,
+    post_type: str = "auto",
+    allow_product: bool = False,
+    include_site_url: bool = False,
+    brand_id: int | None = None,
+    product_id: int | None = None,
+) -> dict:
+    """帖子生成核心（API 与 Campaign 共用）：AI 写稿，只生成不落库。
+
+    返回 dict(title, body, keyword, site_url, intent)。
+    DeepSeekError / ValueError 由调用方处理。
+    """
+    from app.api.v1.reddit import (  # 延迟导入避免循环依赖（同 reddit_tasks 先例）
+        _persona_prompt_for,
+        _purpose_for_subreddit,
+        _rules_text_for_subreddit,
+        _site_url_from_domain,
+    )
+    from app.models.reddit import RedditBrand, RedditPost, RedditProduct, RedditProductKeyword
+    from app.services.ai_writer import get_ai_client
+    from app.services.reddit_client import get_reddit_client_for_account, normalize_subreddit
+    from app.services.reddit_discover import pick_promo_search_keyword, product_search_terms
+    from app.services.reddit_mix import resolve_post_intent
+    from app.services.reddit_style import fetch_community_examples
+
+    site_url = None
+    if allow_product and include_site_url:
+        site_url = _site_url_from_domain(site.domain)
+
+    purpose = _purpose_for_subreddit(db, site.id, subreddit)
+    intent = resolve_post_intent(
+        post_type=post_type,
+        community_purpose=purpose,
+        include_site_url=bool(site_url),
+        allow_product=allow_product,
+    )
+
+    persona_prompt = _persona_prompt_for(db, site.id, account.id)
+    product_brief = None
+    keyword = ""
+    if allow_product and product_id:
+        product = (
+            db.query(RedditProduct)
+            .filter(RedditProduct.id == product_id, RedditProduct.is_active.is_(True))
+            .first()
+        )
+        if not product:
+            raise ValueError("产品不存在或已停用")
+        brand = (
+            db.query(RedditBrand)
+            .filter(
+                RedditBrand.id == (brand_id or product.brand_id),
+                RedditBrand.site_id == site.id,
+                RedditBrand.is_active.is_(True),
+            )
+            .first()
+        )
+        if not brand:
+            raise ValueError("产品所属品牌不存在或已停用")
+        terms = product_search_terms(
+            keywords=[r.keyword for r in (product.keyword_rows or [])],
+        )
+        if not terms:
+            raise ValueError("该产品尚未绑定关键词，请先在品牌/产品库中填写")
+        keyword = pick_promo_search_keyword(terms)
+        product_brief = _product_brief(brand, product)
+
+    recent_titles = [
+        row[0]
+        for row in (
+            db.query(RedditPost.title)
+            .filter(
+                RedditPost.account_id == account.id,
+                RedditPost.post_type == post_type,
+            )
+            .order_by(RedditPost.id.desc())
+            .limit(8)
+            .all()
+        )
+        if row[0]
+    ]
+
+    ai = get_ai_client()
+    client = get_reddit_client_for_account(account)
+    community_examples = fetch_community_examples(client, subreddit)
+    generated = ai.generate_reddit_post(
+        post_type=post_type,
+        subreddit=subreddit,
+        keyword=keyword,
+        site_url=site_url,
+        persona_prompt=persona_prompt,
+        product_brief=product_brief,
+        allow_product=allow_product,
+        community_rules=_rules_text_for_subreddit(db, site.id, subreddit, account_id=account.id),
+        avoid_titles=recent_titles,
+        community_examples=community_examples,
+        site_id=site.id,
+    )
+    return {
+        "title": generated["title"],
+        "body": generated["body"],
+        "keyword": keyword,
+        "site_url": site_url,
+        "intent": intent,
+        "subreddit": normalize_subreddit(subreddit),
+    }

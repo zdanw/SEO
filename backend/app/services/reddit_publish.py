@@ -6,15 +6,24 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from sqlalchemy.orm import Session
 
 from app.models.reddit import RedditComment, RedditPost
-from app.services.reddit_client import RedditApiError, get_reddit_client_for_account
+from app.services.reddit_client import (
+    RedditActionRetryable,
+    RedditApiError,
+    get_reddit_client_for_account,
+    reddit_retry_delay,
+)
 from app.services.reddit_mix import count_mix_window, enforce_promo_quota
 from app.services.reddit_risk import RiskViolation, check_comment_publish, check_post_publish
 
 _CLAIMABLE = ("approved", "failed")
+
+# 限流/熔断自动重试上限（attempt 0-based：0/1 重试，2 耗尽标 failed）
+_PUBLISH_AUTO_RETRIES = 2
 
 
 def enforce_publish_mix_quota(db: Session, site_id: int, intent: str | None) -> None:
@@ -29,7 +38,7 @@ def _repair_posted_post(db: Session, post: RedditPost) -> RedditPost:
         post.status = "posted"
         changed = True
     if post.published_at is None:
-        post.published_at = datetime.utcnow()
+        post.published_at = now_bj()
         changed = True
     if post.error_message is not None:
         post.error_message = None
@@ -46,7 +55,7 @@ def _repair_posted_comment(db: Session, comment: RedditComment) -> RedditComment
         comment.status = "posted"
         changed = True
     if comment.published_at is None:
-        comment.published_at = datetime.utcnow()
+        comment.published_at = now_bj()
         changed = True
     if comment.error_message is not None:
         comment.error_message = None
@@ -69,7 +78,7 @@ def _claim_post(db: Session, post_id: int) -> bool:
         .update(
             {
                 "status": "posting",
-                "updated_at": datetime.utcnow(),
+                "updated_at": now_bj(),
             },
             synchronize_session="fetch",
         )
@@ -89,7 +98,7 @@ def _claim_comment(db: Session, comment_id: int) -> bool:
         .update(
             {
                 "status": "posting",
-                "updated_at": datetime.utcnow(),
+                "updated_at": now_bj(),
             },
             synchronize_session="fetch",
         )
@@ -98,8 +107,14 @@ def _claim_comment(db: Session, comment_id: int) -> bool:
     return rows == 1
 
 
-def publish_post_now(db: Session, post: RedditPost, *, skip_risk_check: bool = False) -> RedditPost:
-    """发布一条已批准（或失败可重试）的 Reddit 帖子。"""
+def publish_post_now(
+    db: Session, post: RedditPost, *, skip_risk_check: bool = False, attempt: int = 0
+) -> RedditPost:
+    """发布一条已批准（或失败可重试）的 Reddit 帖子。
+
+    遇 429 限流/503 熔断：回 approved + scheduled_at 前移，抛 RedditActionRetryable
+    由任务层延迟重试；重试耗尽标 failed 留痕。
+    """
     db.refresh(post)
 
     if post.reddit_post_id:
@@ -147,21 +162,45 @@ def publish_post_now(db: Session, post: RedditPost, *, skip_risk_check: bool = F
         if permalink and not permalink.startswith("http"):
             permalink = f"https://www.reddit.com{permalink}"
         post.reddit_permalink = permalink or None
-        post.published_at = datetime.utcnow()
+        post.published_at = now_bj()
         post.error_message = None
         post.scheduled_at = None
     except RedditApiError as exc:
+        wait = reddit_retry_delay(exc)
+        db.rollback()
+        db.refresh(post)
+        if wait is not None and attempt < _PUBLISH_AUTO_RETRIES:
+            # 回 approved + scheduled_at 前移：Celery retry 与定时扫描双保险
+            post.status = "approved"
+            post.scheduled_at = now_bj() + timedelta(seconds=wait)
+            post.error_message = (
+                f"限流({exc.status_code})，{wait}s 后自动重试"
+                f"（第 {attempt + 1}/{_PUBLISH_AUTO_RETRIES} 次）：{str(exc)[:300]}"
+            )
+            db.commit()
+            db.refresh(post)
+            raise RedditActionRetryable(
+                str(exc)[:300], status_code=exc.status_code or 429, retry_after=wait, attempt=attempt
+            ) from exc
         post.status = "failed"
-        post.error_message = str(exc)
+        post.error_message = str(exc)[:500]
     db.commit()
     db.refresh(post)
     return post
 
 
 def publish_comment_now(
-    db: Session, comment: RedditComment, *, skip_risk_check: bool = False
+    db: Session,
+    comment: RedditComment,
+    *,
+    skip_risk_check: bool = False,
+    attempt: int = 0,
 ) -> RedditComment:
-    """发布一条已批准（或失败可重试）的 Reddit 评论。"""
+    """发布一条已批准（或失败可重试）的 Reddit 评论。
+
+    遇 429 限流/503 熔断：回 approved + scheduled_at 前移，抛 RedditActionRetryable
+    由任务层延迟重试；重试耗尽标 failed 留痕。
+    """
     db.refresh(comment)
 
     if comment.reddit_comment_id:
@@ -202,12 +241,28 @@ def publish_comment_now(
         result = client.submit_comment(comment.target_thing_id, comment.body, comment.subreddit)
         comment.status = "posted"
         comment.reddit_comment_id = result.get("name") or result.get("id")
-        comment.published_at = datetime.utcnow()
+        comment.published_at = now_bj()
         comment.error_message = None
         comment.scheduled_at = None
     except RedditApiError as exc:
+        wait = reddit_retry_delay(exc)
+        db.rollback()
+        db.refresh(comment)
+        if wait is not None and attempt < _PUBLISH_AUTO_RETRIES:
+            # 回 approved + scheduled_at 前移：Celery retry 与定时扫描双保险
+            comment.status = "approved"
+            comment.scheduled_at = now_bj() + timedelta(seconds=wait)
+            comment.error_message = (
+                f"限流({exc.status_code})，{wait}s 后自动重试"
+                f"（第 {attempt + 1}/{_PUBLISH_AUTO_RETRIES} 次）：{str(exc)[:300]}"
+            )
+            db.commit()
+            db.refresh(comment)
+            raise RedditActionRetryable(
+                str(exc)[:300], status_code=exc.status_code or 429, retry_after=wait, attempt=attempt
+            ) from exc
         comment.status = "failed"
-        comment.error_message = str(exc)
+        comment.error_message = str(exc)[:500]
     db.commit()
     db.refresh(comment)
     return comment
@@ -231,7 +286,7 @@ def force_fail_post(
         raise ValueError("仅发布中（posting）的任务可强制失败")
     post.status = "failed"
     post.error_message = reason
-    post.updated_at = datetime.utcnow()
+    post.updated_at = now_bj()
     db.commit()
     db.refresh(post)
     return post
@@ -250,7 +305,7 @@ def force_fail_comment(
         raise ValueError("仅发布中（posting）的任务可强制失败")
     comment.status = "failed"
     comment.error_message = reason
-    comment.updated_at = datetime.utcnow()
+    comment.updated_at = now_bj()
     db.commit()
     db.refresh(comment)
     return comment
@@ -258,7 +313,7 @@ def force_fail_comment(
 
 def recover_stale_posting(db: Session, *, timeout_minutes: int = _DEFAULT_STALE_MINUTES) -> int:
     """将超时仍无外部 ID 的 posting 回收为 failed。返回回收条数。"""
-    cutoff = datetime.utcnow() - timedelta(minutes=timeout_minutes)
+    cutoff = now_bj() - timedelta(minutes=timeout_minutes)
     recovered = 0
 
     posts = (
@@ -273,7 +328,7 @@ def recover_stale_posting(db: Session, *, timeout_minutes: int = _DEFAULT_STALE_
     for post in posts:
         post.status = "failed"
         post.error_message = _STALE_MSG
-        post.updated_at = datetime.utcnow()
+        post.updated_at = now_bj()
         recovered += 1
 
     comments = (
@@ -288,7 +343,7 @@ def recover_stale_posting(db: Session, *, timeout_minutes: int = _DEFAULT_STALE_
     for comment in comments:
         comment.status = "failed"
         comment.error_message = _STALE_MSG
-        comment.updated_at = datetime.utcnow()
+        comment.updated_at = now_bj()
         recovered += 1
 
     if recovered:

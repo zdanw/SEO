@@ -1,4 +1,5 @@
 from datetime import datetime
+from app.core.timeutil import now_bj
 from sqlalchemy import Integer, String, DateTime, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,7 +22,7 @@ class Keyword(Base):
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=datetime.utcnow,
+        default=now_bj,
         nullable=False,
     )
 

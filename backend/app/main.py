@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import settings
+from app.core.exception_handlers import register_exception_handlers
+from app.core.logging_config import AccessLogMiddleware, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +26,7 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
 def create_application() -> FastAPI:
     settings.validate_production()
+    setup_logging(debug=settings.APP_DEBUG)
 
     app = FastAPI(
         title=settings.APP_NAME,
@@ -32,6 +35,10 @@ def create_application() -> FastAPI:
         description="SEO 平台 - 数据监控 / Reddit 社交分发 / 排名监控",
     )
 
+    register_exception_handlers(app)
+
+    # add_middleware 后添加的在外层：CORS → RequestId → AccessLog → 路由
+    app.add_middleware(AccessLogMiddleware)
     app.add_middleware(RequestIdMiddleware)
     cors_origins = settings.cors_origins_list()
     app.add_middleware(

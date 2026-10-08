@@ -29,6 +29,37 @@ class RedditApiError(RuntimeError):
         self.retry_after = retry_after
 
 
+class RedditActionRetryable(RedditApiError):
+    """Reddit 操作遇限流/熔断，已重置为待重试状态，由任务层延迟自动重试。
+
+    继承 RedditApiError：手动发布的 API 路径未捕获时也能按 429 正确返回。
+    """
+
+    def __init__(self, message: str, status_code: int, retry_after: int, attempt: int) -> None:
+        super().__init__(message, status_code=status_code, retry_after=retry_after)
+        self.attempt = attempt
+
+
+# 熔断器 open_duration=600s（reddit 平台），503 等 half-open 需要 ≥600s
+_RETRY_DEFAULTS = {429: 60, 503: 620}
+_RETRY_CAP_SECONDS = 900
+
+
+def reddit_retry_delay(exc: RedditApiError, cap: int = _RETRY_CAP_SECONDS) -> int | None:
+    """瞬时限流(429)/熔断(503)返回建议等待秒数；其余错误返回 None（不自动重试）。
+
+    - 429：本地令牌桶拒绝（retry_after=10）或上游限流 → clamp 至 30s 起
+    - 503：熔断器打开 → 默认等 620s（open 600s 后进入半开）
+    - 5xx 其他（500/502/504）：语义不明（超时可能已生效），不自动重试防重复
+    """
+    code = getattr(exc, "status_code", None)
+    default = _RETRY_DEFAULTS.get(code)
+    if default is None:
+        return None
+    wait = getattr(exc, "retry_after", None) or default
+    return int(max(30, min(wait, cap)))
+
+
 def parse_reddit_post_url(url: str) -> tuple[str, str]:
     """Parse a Reddit post URL into (thing_id, subreddit)."""
     m = _REDDIT_POST_RE.search(url.strip())

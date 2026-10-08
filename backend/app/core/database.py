@@ -10,7 +10,7 @@ engine = create_engine(
     pool_pre_ping=True,
     pool_size=10,
     max_overflow=20,
-    echo=settings.APP_DEBUG,
+    echo=False,  # SQL 日志统一走 logging（sqlalchemy.engine logger），避免 echo handler 与 root 重复输出
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

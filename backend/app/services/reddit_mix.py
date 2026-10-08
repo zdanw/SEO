@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from app.core.timeutil import now_bj
 
 from sqlalchemy.orm import Session
 
@@ -62,7 +63,7 @@ def count_mix_window(db: Session, site_id: int, *, days: int = 7) -> MixCounts:
     """统计站点近 N 天已发布帖+评的 casual/promo 数量（按发布时间）。待审/草稿不计入配额。"""
     from app.models.reddit import RedditComment, RedditPost
 
-    since = datetime.utcnow() - timedelta(days=days)
+    since = now_bj() - timedelta(days=days)
     counts = MixCounts()
     for model in (RedditPost, RedditComment):
         rows = (

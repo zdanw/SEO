@@ -1,8 +1,10 @@
-from datetime import datetime
+from datetime import date, datetime
+from app.core.timeutil import now_bj
 
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -11,6 +13,7 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,11 +55,14 @@ class RedditPost(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_intent: Mapped[str] = mapped_column(String(20), default="casual", nullable=False)
+    campaign_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("reddit_campaigns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
 
     account: Mapped["SocialAccount"] = relationship("SocialAccount")
@@ -99,11 +105,14 @@ class RedditComment(Base):
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    campaign_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("reddit_campaigns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
 
     account: Mapped["SocialAccount"] = relationship("SocialAccount")
@@ -139,10 +148,10 @@ class RedditAccountProfile(Base):
     last_warning_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     karma_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
 
     account: Mapped["SocialAccount"] = relationship("SocialAccount")
@@ -187,10 +196,10 @@ class RedditCommunity(Base):
     activity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     verify_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
 
     products: Mapped[list["RedditProduct"]] = relationship(
@@ -212,10 +221,10 @@ class RedditBrand(Base):
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
 
     products: Mapped[list["RedditProduct"]] = relationship(
@@ -238,10 +247,10 @@ class RedditProduct(Base):
     talking_points: Mapped[list | None] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
 
     brand: Mapped["RedditBrand"] = relationship("RedditBrand", back_populates="products")
@@ -269,7 +278,7 @@ class RedditProductKeyword(Base):
     )
     keyword: Mapped[str] = mapped_column(String(200), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
 
     product: Mapped["RedditProduct"] = relationship("RedditProduct", back_populates="keyword_rows")
@@ -291,10 +300,134 @@ class RedditPostMetric(Base):
     num_comments: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     upvote_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     synced_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, nullable=False
+        DateTime(timezone=True), default=now_bj, nullable=False
     )
 
     post: Mapped["RedditPost"] = relationship("RedditPost", back_populates="metrics")
+
+
+class RedditCampaign(Base):
+    """Reddit 自动化 Campaign：在指定时间段内自动执行发帖/评论/点赞系列操作。
+
+    调度引擎（campaign_tick）每 15 分钟扫描 running 状态的 campaign，
+    按当日配额 + 活跃时段随机生成动作并复用现有定时发布链路。
+    """
+
+    __tablename__ = "reddit_campaigns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    site_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("client_sites.id"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    # draft / running / paused / ended
+    status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False, index=True)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # 每日活跃时段（UTC 小时，0-23），执行时间随机裁剪到该窗口内
+    active_hour_start: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    active_hour_end: Mapped[int] = mapped_column(Integer, default=23, nullable=False)
+    # auto = AI 生成后直接定时发布 / review = 进入待审队列人工批准
+    content_mode: Mapped[str] = mapped_column(String(20), default="review", nullable=False)
+    daily_posts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    daily_comments: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    daily_upvotes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    self_upvote_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    self_upvote_delay_minutes: Mapped[int] = mapped_column(Integer, default=240, nullable=False)
+    # 发帖目标社区（不含 r/ 前缀）；评论/点赞目标自动发现
+    subreddits: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # 账号池（social_accounts.id 列表）
+    account_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    brand_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("reddit_brands.id"), nullable=True
+    )
+    product_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("reddit_products.id"), nullable=True
+    )
+    last_tick_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
+    )
+
+
+class RedditCampaignAction(Base):
+    """Campaign 动作执行记录：计划 → 执行 → 结果，含防重 dedup_key。"""
+
+    __tablename__ = "reddit_campaign_actions"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "dedup_key", name="uq_campaign_action_dedup"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    campaign_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("reddit_campaigns.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    site_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("client_sites.id"), nullable=False, index=True
+    )
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("social_accounts.id"), nullable=False, index=True
+    )
+    # post / comment / upvote_related / upvote_self
+    action_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    # pending / executing / done / failed / skipped
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
+    planned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    post_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("reddit_posts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    comment_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("reddit_comments.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    target_thing_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_post_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skip_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 防重复计划：post:{campaign}:{account}:{yyyymmdd} / upvote:{account}:{thing} / upvote_self:{voter}:{post}
+    dedup_key: Mapped[str] = mapped_column(String(150), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
+    )
+
+
+class RedditVoteLog(Base):
+    """Reddit 投票记录（点赞审计）：unique(account, thing) + upsert。
+
+    兼作「该账号是否已赞过」查询依据，避免重复投票触发 Reddit 风控。
+    """
+
+    __tablename__ = "reddit_vote_logs"
+    __table_args__ = (
+        UniqueConstraint("account_id", "thing_id", name="uq_vote_log_account_thing"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    site_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("client_sites.id"), nullable=False, index=True
+    )
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("social_accounts.id"), nullable=False, index=True
+    )
+    thing_id: Mapped[str] = mapped_column(String(50), nullable=False)
+    direction: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # 1 / 0 / -1
+    # campaign / manual
+    source: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
+    campaign_action_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("reddit_campaign_actions.id", ondelete="SET NULL"), nullable=True
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, nullable=False
+    )
 
 
 from app.models.social import SocialAccount  # noqa: E402

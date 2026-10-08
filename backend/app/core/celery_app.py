@@ -1,7 +1,18 @@
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import setup_logging
 
 from app.core.config import settings
+
+
+@setup_logging.connect
+def _configure_worker_logging(**_kwargs) -> None:
+    """接管 Celery worker/beat 日志：复用统一格式（logging_config），
+    避免 Celery 默认 hijack 根 logger 造成日志双份输出、格式割裂。"""
+    from app.core.logging_config import setup_logging
+
+    setup_logging(debug=settings.APP_DEBUG)
+
 
 celery_app = Celery(
     "seo_platform",
@@ -11,10 +22,12 @@ celery_app = Celery(
         "app.tasks.serp_tasks",
         "app.tasks.alert_tasks",
         "app.tasks.reddit_tasks",
+        "app.tasks.reddit_campaign_tasks",
     ],
 )
 
 celery_app.conf.update(
+    worker_hijack_root_logger=False,  # 日志统一由 logging_config 接管（配合 setup_logging 信号）
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
@@ -30,45 +43,23 @@ celery_app.conf.update(
         "app.tasks.reddit_*": {"queue": "social"},
     },
     beat_schedule={
-        # 每 6 小时全量抓取 SERP
-        "crawl-all-keywords": {
-            "task": "app.tasks.serp_tasks.crawl_all_keywords",
-            "schedule": crontab(minute=0, hour="*/6"),
-        },
-        # 每日 09:30 检查 SERP 失败率
-        "check-serp-failures": {
-            "task": "app.tasks.alert_tasks.check_serp_failures",
-            "schedule": crontab(minute=30, hour=9),
-        },
-        # 每 30 分钟代理池健康检测
-        "proxy-health-check": {
-            "task": "app.tasks.serp_tasks.proxy_health_check",
-            "schedule": crontab(minute="*/30"),
-        },
         # Reddit：每 15 分钟发布到期的定时帖子/评论
         "reddit-publish-scheduled": {
             "task": "app.tasks.reddit_tasks.publish_scheduled_reddit_content",
             "schedule": crontab(minute="*/15"),
+        },
+        # Reddit：每 15 分钟 Campaign 调度（与发布扫描错峰）
+        "reddit-campaign-tick": {
+            "task": "app.tasks.reddit_campaign_tasks.campaign_tick",
+            "schedule": crontab(minute="7,22,37,52"),
         },
         # Reddit：每 5 分钟回收卡住的 posting
         "reddit-recover-stale-posting": {
             "task": "app.tasks.reddit_tasks.recover_stale_reddit_posting",
             "schedule": crontab(minute="*/5"),
         },
-        # Reddit：每日 08:00 汇总已发布帖子互动数据
-        "reddit-sync-post-metrics": {
-            "task": "app.tasks.reddit_tasks.sync_reddit_post_metrics",
-            "schedule": crontab(minute=0, hour=8),
-        },
-        # Reddit：每日 09:00 账号健康检查与风控预警
-        "reddit-account-health": {
-            "task": "app.tasks.reddit_tasks.reddit_account_health_check",
-            "schedule": crontab(minute=0, hour=9),
-        },
-        # Reddit：每 3 小时智能发现讨论并入待审队列
-        "reddit-smart-discover": {
-            "task": "app.tasks.reddit_tasks.discover_reddit_discussions",
-            "schedule": crontab(minute=20, hour="*/3"),
-        },
+        # 已移除的固定调度（按需可手动/API 触发，任务本身仍注册）：
+        # SERP 全量抓取、代理健康检测、SERP 失败率告警、
+        # Reddit 帖子指标同步、账号健康检查、智能发现讨论
     },
 )
