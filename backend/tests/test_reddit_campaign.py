@@ -9,6 +9,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.database import Base
+from app.core.timeutil import now_bj
 from app.models.client_site import ClientSite
 from app.models.reddit import (
     RedditAccountProfile,
@@ -17,7 +18,9 @@ from app.models.reddit import (
     RedditCampaignAction,
     RedditComment,
     RedditCommunity,
+    RedditCommunityActivity,
     RedditPost,
+    RedditPostMetric,
     RedditProduct,
     RedditVoteLog,
 )
@@ -36,8 +39,10 @@ _TABLES = [
     RedditCampaign.__table__,
     RedditCampaignAction.__table__,
     RedditPost.__table__,
+    RedditPostMetric.__table__,
     RedditComment.__table__,
     RedditVoteLog.__table__,
+    RedditCommunityActivity.__table__,
 ]
 
 @pytest.fixture()
@@ -114,7 +119,7 @@ def _action(db, campaign, account, **kwargs):
         account_id=account.id,
         action_type="upvote_related",
         status="pending",
-        planned_at=datetime.utcnow(),
+        planned_at=now_bj(),
         dedup_key=f"upvote:{account.id}:t3_x{datetime.utcnow().microsecond}",
     )
     defaults.update(kwargs)
@@ -156,8 +161,25 @@ def test_quota_used_counts_and_excludes_skipped(db, site):
     _action(db, campaign, acc, action_type="post", status="skipped", dedup_key="post:1:1:d2")
     _action(db, campaign, acc, action_type="comment", status="pending", dedup_key="c1")
     _action(db, campaign, acc, action_type="upvote_related", status="pending", dedup_key="u1")
-    quota = rc._quota_used(db, campaign.id, datetime.utcnow())
+    quota = rc._quota_used(db, campaign.id, now_bj())
     assert quota == {"posts": 1, "comments": 1, "upvotes": 1}
+
+
+def test_quota_used_counts_by_planned_date(db, site):
+    """配额按 planned_at 归属日期：昨天创建但排到今天的计入今天；排到明天的计入明天。"""
+    campaign = _campaign(db, site.id)
+    acc = _account(db, site.id, "a1")
+    now = now_bj()
+    _action(
+        db, campaign, acc, action_type="post", status="pending",
+        created_at=now - timedelta(days=1), planned_at=now + timedelta(hours=1), dedup_key="p_old",
+    )
+    _action(
+        db, campaign, acc, action_type="upvote_related", status="pending",
+        created_at=now, planned_at=now + timedelta(days=1), dedup_key="u_tomorrow",
+    )
+    quota = rc._quota_used(db, campaign.id, now)
+    assert quota == {"posts": 1, "comments": 0, "upvotes": 0}
 
 
 def test_insert_action_dedup_unique_per_campaign(db, site):
@@ -197,13 +219,41 @@ def test_pool_accounts_filters_risk_and_inactive(db, site):
 
 
 # ============ 排期随机化 ============
-def test_plan_time_respects_min_gap(db, site):
+def test_plan_time_respects_min_gap_both_sides(db, site):
+    """间隔双向校验：新动作与已排动作前后都保持 ≥25 分钟，可排在空档而非只顺延。"""
     acc = _account(db, site.id, "a1")
-    now = datetime.utcnow()
+    campaign = _campaign(db, site.id)
+    now = datetime(2026, 10, 9, 8, 0)
+    gap = timedelta(minutes=rc.MIN_ACTION_GAP_MINUTES)
+    # 已排动作 8:05，窗口起点 8:00 之前无空档 → 新动作必然顺延到 8:30 之后
     future = now + timedelta(minutes=5)
-    _action(db, _campaign(db, site.id), acc, status="pending", planned_at=future)
+    _action(db, campaign, acc, status="pending", planned_at=future, dedup_key="future")
     planned = rc._plan_time(db, acc.id, now, 0, 23)
-    assert planned >= future + timedelta(minutes=rc.MIN_ACTION_GAP_MINUTES)
+    assert planned >= future + gap
+    # 23:00 再排一条：[8:30, 22:35] 与 [23:25 后] 空档均可落点（双向校验通过）
+    late = datetime(2026, 10, 9, 23, 0)
+    _action(db, campaign, acc, status="pending", planned_at=late, dedup_key="late")
+    planned2 = rc._plan_time(db, acc.id, now, 0, 23)
+    assert planned2 >= late + gap or planned2 <= late - gap
+    assert planned2 >= future + gap
+
+
+def test_plan_time_returns_next_window_when_today_full(db, site):
+    """今日窗口空档被已排动作占满时，返回下一个窗口起点（跨天由调用方跳过）。"""
+    acc = _account(db, site.id, "a1")
+    campaign = _campaign(db, site.id)
+    now = datetime(2026, 10, 9, 14, 0)
+    # 每 25-30 分钟一条，占满整个 14-16:59 窗口
+    for i, planned in enumerate(
+        (14, 40, 70, 100, 130, 160)  # 距 14:00 的分钟数
+    ):
+        _action(
+            db, campaign, acc, status="pending",
+            planned_at=now + timedelta(minutes=planned), dedup_key=f"fill{i}",
+        )
+    t = rc._plan_time(db, acc.id, now, 14, 16)
+    # 今日无空档 → 顺延到次日窗口内随机取点
+    assert datetime(2026, 10, 10, 14, 0) <= t <= datetime(2026, 10, 10, 16, 59, 59)
 
 
 # ============ 自赞：voter != author ============
@@ -461,3 +511,184 @@ def test_tick_ignores_out_of_range_campaign(db, site):
         summary = rc.run_campaign_tick(db)
     assert summary["campaigns"] == 0
     assert summary["posts"] == 0
+
+
+# ============ 每日一轮：排期不跨天 ============
+def test_tick_skips_planning_when_window_passed(db, site):
+    """今日活跃窗口已过：不再排今天的配额，明天由明天自己的 tick 排满一轮。"""
+    acc = _account(db, site.id, "a1")
+    _profile(db, site.id, acc.id)
+    campaign = _campaign(
+        db, site.id, daily_posts=1, content_mode="auto",
+        account_ids=[acc.id], active_hour_start=14, active_hour_end=16,
+    )
+    stats = rc._tick_campaign(db, campaign, datetime(2026, 10, 9, 17, 0))
+    assert stats == {"posts": 0, "comments": 0, "upvotes": 0, "skipped": 0}
+    assert db.query(RedditPost).filter_by(campaign_id=campaign.id).count() == 0
+    assert db.query(RedditCampaignAction).filter_by(campaign_id=campaign.id).count() == 0
+
+
+def test_tick_plans_into_free_slot_before_tail_action(db, site):
+    """窗口尾部已有 pending 动作时，新动作排进其之前的空档，而不是被顶出窗口饿死。"""
+    acc = _account(db, site.id, "a1")
+    _profile(db, site.id, acc.id)
+    campaign = _campaign(
+        db, site.id, daily_posts=1, content_mode="auto",
+        account_ids=[acc.id], active_hour_start=14, active_hour_end=16,
+    )
+    # 同账号已有 pending 动作占住窗口尾（16:50）→ 空档为 [14:00, 16:25]
+    _action(db, campaign, acc, planned_at=datetime(2026, 10, 9, 16, 50), dedup_key="u_tail")
+    with _patch_generation():
+        stats = rc._tick_campaign(db, campaign, datetime(2026, 10, 9, 14, 0))
+    assert stats["posts"] == 1
+    post_action = (
+        db.query(RedditCampaignAction)
+        .filter_by(campaign_id=campaign.id, action_type="post")
+        .one()
+    )
+    assert datetime(2026, 10, 9, 14, 0) <= post_action.planned_at <= datetime(2026, 10, 9, 16, 25)
+
+
+def test_tick_skips_when_window_slots_exhausted(db, site):
+    """今日窗口空档被已排动作占满：不再排今天的配额（明天由明天 tick 补足）。"""
+    acc = _account(db, site.id, "a1")
+    _profile(db, site.id, acc.id)
+    campaign = _campaign(
+        db, site.id, daily_posts=1, content_mode="auto",
+        account_ids=[acc.id], active_hour_start=14, active_hour_end=16,
+    )
+    # 每 25-30 分钟一条 pending，占满 14-16:59 窗口
+    for i, minutes in enumerate((14, 40, 70, 100, 130, 160)):
+        _action(
+            db, campaign, acc,
+            planned_at=datetime(2026, 10, 9, 14, 0) + timedelta(minutes=minutes),
+            dedup_key=f"fill{i}",
+        )
+    stats = rc._tick_campaign(db, campaign, datetime(2026, 10, 9, 14, 0))
+    assert stats["posts"] == 0
+    assert db.query(RedditPost).filter_by(campaign_id=campaign.id).count() == 0
+
+
+def test_each_day_gets_fresh_quota_round(db, site):
+    """昨日已执行的配额不占用今天：第二天能重新排满一轮（每日执行一轮）。"""
+    acc = _account(db, site.id, "a1")
+    _profile(db, site.id, acc.id)
+    campaign = _campaign(db, site.id, daily_posts=1, content_mode="auto", account_ids=[acc.id])
+    now = now_bj()
+    _action(
+        db, campaign, acc, action_type="post", status="done",
+        planned_at=now - timedelta(days=1), dedup_key="post:yesterday",
+    )
+    with _patch_generation():
+        stats = rc._tick_campaign(db, campaign, now)
+    assert stats["posts"] == 1
+    action = (
+        db.query(RedditCampaignAction)
+        .filter_by(campaign_id=campaign.id, action_type="post", dedup_key="post:yesterday")
+        .one()
+    )
+    assert action.status == "done"  # 昨天的动作保持不变，新增的是今天的一轮
+
+
+# ============ 暂停语义 / 自动结束 / 发布门控 ============
+def test_as_bj_naive_converts_aware_and_keeps_naive():
+    from datetime import timezone
+
+    from app.core.timeutil import as_bj_naive
+
+    naive = datetime(2026, 10, 9, 15, 0)
+    assert as_bj_naive(naive) is naive  # naive 原样（视为北京墙钟）
+    aware_utc = datetime(2026, 10, 9, 7, 0, tzinfo=timezone.utc)
+    assert as_bj_naive(aware_utc) == datetime(2026, 10, 9, 15, 0)  # UTC→北京墙钟
+    assert as_bj_naive(aware_utc).tzinfo is None
+
+
+def test_plan_time_handles_aware_planned_at_from_db(monkeypatch):
+    """Postgres timestamptz 读回带 tzinfo，_plan_time 不得因 naive/aware 比较崩溃。"""
+    from datetime import timezone
+
+    now = datetime(2026, 10, 9, 8, 0)
+    aware_last = (now + timedelta(hours=2)).replace(tzinfo=timezone(timedelta(hours=8)))
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = [(aware_last,)]
+    t = rc._plan_time(db, 1, now, 0, 23)
+    assert t.tzinfo is None
+    # 双向间隔：与已有 pending 动作保持 ≥25 分钟（此场景只能落在其之前空档）
+    last_naive = aware_last.replace(tzinfo=None)
+    assert t <= last_naive - timedelta(minutes=25) or t >= last_naive + timedelta(minutes=25)
+
+
+def test_plan_time_overflows_to_next_window_when_no_slot():
+    """窗口内空档被已排动作占满时，顺延到下一个窗口内取点。"""
+    last = datetime(2026, 10, 9, 14, 40)  # 同账号 pending 占住 13-14:59 窗口的剩余空档
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = [(last,)]
+    now = datetime(2026, 10, 9, 14, 15)  # 窗口 13-14，剩余 14:15-14:59
+    t = rc._plan_time(db, 1, now, 13, 14)
+    # 14:40±25min 覆盖整个剩余窗口 → 顺延到次日窗口内随机取点
+    assert t.date() == datetime(2026, 10, 10).date()
+    assert 13 <= t.hour <= 14
+
+
+def test_due_upvote_excludes_non_running_campaign(db, site):
+    """暂停/结束 campaign 的到期点赞动作不再发放，启动后自然恢复。"""
+    acc = _account(db, site.id, "a1")
+    _profile(db, site.id, acc.id)
+    running = _campaign(db, site.id, name="run", account_ids=[acc.id])
+    paused = _campaign(db, site.id, name="paused", status="paused", account_ids=[acc.id])
+    a_run = _action(db, running, acc, target_thing_id="t3_run", dedup_key="u_run")
+    _action(db, paused, acc, target_thing_id="t3_paused", dedup_key="u_paused")
+
+    due = rc.due_upvote_action_ids(db)
+    assert due == [a_run.id]
+
+
+def test_run_campaign_tick_auto_ends_expired(db, site):
+    """end_date 已过的 running campaign 自动置 ended，不再计划动作。"""
+    acc = _account(db, site.id, "a1")
+    _profile(db, site.id, acc.id)
+    today = datetime.utcnow().date()
+    campaign = _campaign(
+        db, site.id, daily_posts=1, content_mode="auto", account_ids=[acc.id],
+        start_date=today - timedelta(days=3), end_date=today - timedelta(days=2),
+    )
+    with _patch_generation():
+        summary = rc.run_campaign_tick(db)
+    assert summary["campaigns"] == 0
+    assert summary["posts"] == 0
+    assert db.get(RedditCampaign, campaign.id).status == "ended"
+
+
+def test_publish_scan_skips_paused_campaign_content(db, site, monkeypatch):
+    """发布扫描：暂停 campaign 的到期内容不发放；普通内容与 running campaign 内容正常入队。"""
+    from app.tasks import reddit_tasks as rt
+
+    acc = _account(db, site.id, "a1")
+    running = _campaign(db, site.id, name="run")
+    paused = _campaign(db, site.id, name="paused", status="paused")
+    now = datetime.utcnow()
+
+    def _post(campaign_id, title):
+        return RedditPost(
+            site_id=site.id, account_id=acc.id, post_type="auto", subreddit="test",
+            keyword="", title=title, body="b", status="approved",
+            campaign_id=campaign_id, scheduled_at=now,
+        )
+
+    p_run = _post(running.id, "t1")
+    p_paused = _post(paused.id, "t2")
+    p_normal = _post(None, "t3")
+    db.add_all([p_run, p_paused, p_normal])
+    db.commit()
+    run_id, normal_id, paused_id = p_run.id, p_normal.id, p_paused.id
+
+    monkeypatch.setattr(rt, "SessionLocal", lambda: db)
+    enqueued: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        rt, "try_enqueue_publish", lambda kind, item_id, task: enqueued.append((kind, item_id)) or True
+    )
+
+    rt.publish_scheduled_reddit_content.run()
+    # 任务 finally 会 close 会话，ORM 对象随后不可访问，故仅用预取的 ID 断言
+    assert sorted(enqueued) == [("post", run_id), ("post", normal_id)]
+    assert paused_id not in [i for _, i in enqueued]

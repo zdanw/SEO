@@ -72,6 +72,10 @@ def campaign_tick() -> dict:
         for action_id in due_ids:
             if _try_enqueue_action(action_id, execute_campaign_action):
                 queued += 1
+        # 全局心跳：供 check_campaign_tick_heartbeat 告警与 ops /queues 判断调度是否停摆
+        from app.services.reddit_campaign import write_campaign_heartbeat
+
+        write_campaign_heartbeat()
         if queued or any(summary.values()):
             logger.info("Campaign tick done: %s, queued actions=%d", summary, queued)
         return {"ok": True, **summary, "queued_actions": queued}
@@ -82,6 +86,33 @@ def campaign_tick() -> dict:
             except Exception:
                 pass
         db.close()
+
+
+_TICK_TRIGGER_DEBOUNCE = 60  # 秒；短时间多次操作只触发一轮
+
+
+def trigger_campaign_tick() -> bool:
+    """业务事件（启动/审批）后立即触发一轮 tick，消除最长 15 分钟的拾取延迟。
+
+    tick 自身幂等（单飞锁 + 状态机），多触发无副作用；60s 防抖避免操作风暴重复入队；
+    broker 不可用时静默降级为等待 beat 定时触发，不影响 API 响应。
+    """
+    try:
+        from app.utils.rate_limiter import get_redis
+
+        r = get_redis()
+        key = "trigger:reddit:campaign_tick"
+        if not r.set(key, "1", nx=True, ex=_TICK_TRIGGER_DEBOUNCE):
+            return False
+        try:
+            campaign_tick.apply_async()
+            return True
+        except Exception:
+            r.delete(key)  # 入队失败清除防抖，下次操作可重试
+            raise
+    except Exception:
+        logger.warning("trigger_campaign_tick failed; fallback to beat schedule", exc_info=True)
+        return False
 
 
 @celery_app.task(
@@ -125,4 +156,20 @@ def execute_campaign_action(self, action_id: int) -> dict:
             get_redis().delete(f"enqueue:reddit:campaign_action:{action_id}")
         except Exception:
             pass
+        db.close()
+
+
+@celery_app.task(
+    name="app.tasks.reddit_campaign_tasks.expand_communities",
+    soft_time_limit=_TICK_SOFT_LIMIT,
+    time_limit=_TICK_HARD_LIMIT,
+)
+def expand_communities() -> dict:
+    """扩池：从优质人设社区扩散相似社区并校验入库（beat 每日）。"""
+    from app.services.reddit_campaign import run_community_expansion
+
+    db = SessionLocal()
+    try:
+        return run_community_expansion(db)
+    finally:
         db.close()

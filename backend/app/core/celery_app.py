@@ -58,6 +58,16 @@ celery_app.conf.update(
             "task": "app.tasks.reddit_tasks.recover_stale_reddit_posting",
             "schedule": crontab(minute="*/5"),
         },
+        # 告警：每 5 分钟检查 Campaign 调度心跳（tick 停摆 → WARNING 日志）
+        "reddit-campaign-heartbeat-check": {
+            "task": "app.tasks.alert_tasks.check_campaign_tick_heartbeat",
+            "schedule": crontab(minute="*/5"),
+        },
+        # Reddit：每天扩池（从优质人设社区扩散相似社区并校验入库）
+        "reddit-expand-communities": {
+            "task": "app.tasks.reddit_campaign_tasks.expand_communities",
+            "schedule": crontab(hour=4, minute=17),
+        },
         # 已移除的固定调度（按需可手动/API 触发，任务本身仍注册）：
         # SERP 全量抓取、代理健康检测、SERP 失败率告警、
         # Reddit 帖子指标同步、账号健康检查、智能发现讨论

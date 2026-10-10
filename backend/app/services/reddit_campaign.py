@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import random
 from datetime import datetime, timedelta
-from app.core.timeutil import from_epoch_bj, now_bj
+from app.core.timeutil import as_bj_naive, from_epoch_bj, now_bj
 from types import SimpleNamespace
 
 from sqlalchemy import func
@@ -92,44 +92,97 @@ def _next_active_time(now: datetime, hour_start: int, hour_end: int) -> datetime
     return now
 
 
+def _can_plan_today(now: datetime, hour_start: int, hour_end: int) -> bool:
+    """今天的活跃窗口是否还有排期余地（窗口已过则今天不再排新动作）。"""
+    return _next_active_time(now, hour_start, hour_end).date() == now.date()
+
+
+def _free_intervals(
+    start: datetime, end: datetime, busy: list[datetime], gap: timedelta
+) -> list[tuple[datetime, datetime]]:
+    """[start, end] 内扣除每个 busy 点 ±gap 后的空闲区间列表（升序）。"""
+    blocked = sorted((p - gap, p + gap) for p in busy)
+    free: list[tuple[datetime, datetime]] = []
+    cur = start
+    for bs, be in blocked:
+        if be <= cur:
+            continue
+        if bs >= end:
+            break
+        if bs > cur:
+            free.append((cur, bs))
+        cur = max(cur, be)
+        if cur >= end:
+            break
+    if cur < end:
+        free.append((cur, end))
+    return free
+
+
 def _plan_time(db: Session, account_id: int, now: datetime, hour_start: int, hour_end: int) -> datetime:
-    """在活跃窗口剩余时段内均匀随机取执行时间，并保证同账号动作最小间隔。"""
+    """在活跃窗口剩余时段内均匀随机取执行时间，并保证同账号动作最小间隔。
+
+    间隔为双向校验：新动作与账号任一已排（pending/executing）动作的前后间隔都
+    不得小于 MIN_ACTION_GAP_MINUTES——否则单个排在窗口尾部的 pending 动作会把
+    当天后续排期全部顶出窗口（排期饿死）。今日窗口无空档时顺延到下一个窗口
+    起点（跨天由调用方按“不跨天排期”规则跳过）。
+    """
+    gap = timedelta(minutes=MIN_ACTION_GAP_MINUTES)
     if _in_active_window(now.hour, hour_start, hour_end):
         start_t = now
     else:
         start_t = _next_active_time(now, hour_start, hour_end)  # 下一个窗口起点
-    end_t = start_t.replace(hour=hour_end % 24, minute=59, second=59, microsecond=0)
-    if end_t <= start_t:
-        end_t += timedelta(days=1)  # 跨午夜窗口（start > end）
-    t = start_t + timedelta(seconds=random.uniform(0, (end_t - start_t).total_seconds()))
-    last = (
-        db.query(RedditCampaignAction.planned_at)
-        .filter(
-            RedditCampaignAction.account_id == account_id,
-            RedditCampaignAction.status.in_(("pending", "executing")),
-            RedditCampaignAction.planned_at.isnot(None),
-        )
-        .order_by(RedditCampaignAction.planned_at.desc())
-        .limit(1)
-        .scalar()
-    )
-    if last:
-        floor = last + timedelta(minutes=MIN_ACTION_GAP_MINUTES)
-        if t < floor:
-            t = floor + timedelta(minutes=random.uniform(0, 5))
-    return t
+
+    for _ in range(3):
+        end_t = start_t.replace(hour=hour_end % 24, minute=59, second=59, microsecond=0)
+        if end_t <= start_t:
+            end_t += timedelta(days=1)  # 跨午夜窗口（start > end）
+        busy = [
+            as_bj_naive(p)
+            for (p,) in db.query(RedditCampaignAction.planned_at)
+            .filter(
+                RedditCampaignAction.account_id == account_id,
+                RedditCampaignAction.status.in_(("pending", "executing")),
+                RedditCampaignAction.planned_at.isnot(None),
+                RedditCampaignAction.planned_at >= start_t - gap,
+                RedditCampaignAction.planned_at <= end_t + gap,
+            )
+            .all()
+        ]
+        # timestamptz 列在 Postgres 读回带 +08 tzinfo，统一转北京墙钟 naive 再比较
+        free = _free_intervals(start_t, end_t, busy, gap)
+        if free:
+            # 按空档长度加权选空档，再在空档内均匀取点
+            total = sum((e - s).total_seconds() for s, e in free)
+            pick = random.uniform(0, total)
+            acc = 0.0
+            for s, e in free:
+                span = (e - s).total_seconds()
+                if acc + span >= pick:
+                    return s + timedelta(seconds=random.uniform(0, span))
+                acc += span
+        # 今日窗口已被占满：顺延到下一个窗口起点重试
+        start_t = _next_active_time(end_t + timedelta(seconds=1), hour_start, hour_end)
+    return start_t  # 兜底：下一窗口起点（调用方跨天检查会跳过）
 
 
 # ============ 配额与账号池 ============
 def _quota_used(db: Session, campaign_id: int, now: datetime) -> dict[str, int]:
-    """当日已计划的动作数（排除 skipped），以建库统计为准、抗重启。"""
+    """当日（按 planned_at 计划执行日归属）已计划的动作数（排除 skipped），以建库统计为准、抗重启。
+
+    按 planned_at 而非 created_at 统计：昨天创建但排到今天的动作计入今天配额，
+    今天排到明天窗口的动作计入明天配额——保证“每日一轮”语义，每天独立补足
+    当天配额，不跨天挤占也不会重复排期。
+    """
     day_start = _utc_day_start(now)
     rows = (
         db.query(RedditCampaignAction.action_type, func.count(RedditCampaignAction.id))
         .filter(
             RedditCampaignAction.campaign_id == campaign_id,
             RedditCampaignAction.status != "skipped",
-            RedditCampaignAction.created_at >= day_start,
+            RedditCampaignAction.planned_at.isnot(None),
+            RedditCampaignAction.planned_at >= day_start,
+            RedditCampaignAction.planned_at < day_start + timedelta(days=1),
         )
         .group_by(RedditCampaignAction.action_type)
         .all()
@@ -170,15 +223,25 @@ def _pool_accounts(db: Session, campaign: RedditCampaign) -> list[SocialAccount]
     return pool
 
 
-def _target_subreddits(db: Session, campaign: RedditCampaign, account: SocialAccount) -> list[str]:
-    """发帖/互动目标社区：campaign 配置 → 账号人设社区 → 站点产品社区。"""
+def _target_subreddits(
+    db: Session,
+    campaign: RedditCampaign,
+    account: SocialAccount,
+    *,
+    include_promo: bool = False,
+) -> list[str]:
+    """发帖/互动目标社区：账号人设社区（+ 可选产品社区）。
+
+    campaign.subreddits 只作为**白名单过滤**，不再覆盖账号人设社区：
+    - 人设内容只发人设社区；产品内容（include_promo=True）才纳入产品社区
+    - 白名单与社区库无交集时忽略白名单，绝不发到未入库的社区
+    - 社区库为空时（旧配置）才回退到 campaign 显式列表
+    """
     from app.services.reddit_client import normalize_subreddit
 
-    names = [normalize_subreddit(s) for s in (campaign.subreddits or []) if s]
-    if names:
-        return names
-    rows = (
-        db.query(RedditCommunity.name)
+    persona = [
+        r[0]
+        for r in db.query(RedditCommunity.name)
         .filter(
             RedditCommunity.site_id == campaign.site_id,
             RedditCommunity.is_active.is_(True),
@@ -186,19 +249,30 @@ def _target_subreddits(db: Session, campaign: RedditCampaign, account: SocialAcc
             RedditCommunity.account_id == account.id,
         )
         .all()
-    )
-    if rows:
-        return [r[0] for r in rows]
-    rows = (
-        db.query(RedditCommunity.name)
-        .filter(
-            RedditCommunity.site_id == campaign.site_id,
-            RedditCommunity.is_active.is_(True),
-            RedditCommunity.purpose == "promo",
-        )
-        .all()
-    )
-    return [r[0] for r in rows]
+        if r[0]
+    ]
+    promo: list[str] = []
+    if include_promo:
+        promo = [
+            r[0]
+            for r in db.query(RedditCommunity.name)
+            .filter(
+                RedditCommunity.site_id == campaign.site_id,
+                RedditCommunity.is_active.is_(True),
+                RedditCommunity.purpose == "promo",
+            )
+            .all()
+            if r[0]
+        ]
+    base = [normalize_subreddit(n) for n in (persona + promo) if n]
+    cfg = [normalize_subreddit(s) for s in (campaign.subreddits or []) if s]
+    if not base:
+        return cfg
+    if cfg:
+        allowed = {s.lower() for s in cfg}
+        filtered = [s for s in base if s.lower() in allowed]
+        return filtered or base
+    return base
 
 
 # ============ AI 成本控制 ============
@@ -260,7 +334,14 @@ def _finish_action(
 
 # ============ 发帖动作 ============
 def _create_campaign_post(
-    db: Session, campaign: RedditCampaign, account: SocialAccount, planned_at: datetime
+    db: Session,
+    campaign: RedditCampaign,
+    account: SocialAccount,
+    planned_at: datetime,
+    *,
+    now: datetime | None = None,
+    daily_cap: int = 0,
+    apply_cooldown: bool = True,
 ) -> tuple[RedditCampaignAction | None, str | None]:
     """生成并落库一条 campaign 帖子；返回 (action, skip_reason)。
 
@@ -268,12 +349,26 @@ def _create_campaign_post(
     review 模式：pending_review 进待审队列。
     """
     from app.services.reddit_content import generate_post_content
+    from app.services.reddit_community_rotation import (
+        pick_post_type,
+        record_activity,
+        select_subreddit,
+    )
 
     site = db.get(ClientSite, campaign.site_id)
-    subreddits = _target_subreddits(db, campaign, account)
+    subreddits = _target_subreddits(
+        db, campaign, account, include_promo=bool(campaign.product_id)
+    )
     if not subreddits:
         return None, None  # 无目标社区：静默跳过（配置问题，避免垃圾记录）
-    subreddit = random.choice(subreddits)
+    subreddit = select_subreddit(
+        db,
+        account_id=account.id,
+        candidates=subreddits,
+        now=now or now_bj(),
+        daily_cap=daily_cap,
+        apply_cooldown=apply_cooldown,
+    )
 
     community = (
         db.query(RedditCommunity)
@@ -289,12 +384,27 @@ def _create_campaign_post(
             is not None
         )
 
+    recent_types = [
+        r[0]
+        for r in db.query(RedditPost.post_type)
+        .filter(
+            RedditPost.account_id == account.id,
+            func.lower(RedditPost.subreddit) == subreddit.lower(),
+        )
+        .order_by(RedditPost.id.desc())
+        .limit(6)
+        .all()
+        if r[0]
+    ]
+    post_type = pick_post_type(recent_types)
+
     try:
         generated = generate_post_content(
             db,
             site=site,
             account=account,
             subreddit=subreddit,
+            post_type=post_type,
             allow_product=allow_product,
             include_site_url=allow_product,
             product_id=campaign.product_id,
@@ -320,7 +430,7 @@ def _create_campaign_post(
     post = RedditPost(
         site_id=campaign.site_id,
         account_id=account.id,
-        post_type="auto",
+        post_type=post_type,
         subreddit=subreddit,
         keyword=generated["keyword"],
         title=generated["title"],
@@ -328,9 +438,13 @@ def _create_campaign_post(
         site_url=generated["site_url"],
         content_intent=generated["intent"],
         campaign_id=campaign.id,
+        ai_risk=generated.get("ai_risk"),
+        ai_score=generated.get("ai_score"),
     )
     dedup_key = f"post:{campaign.id}:{account.id}:{planned_at:%Y%m%d}"
 
+    ai_risk = generated.get("ai_risk")
+    blocked_reason: str | None = None
     if campaign.content_mode == "auto":
         report = check_post_publish(
             db,
@@ -340,18 +454,30 @@ def _create_campaign_post(
             body=post.body,
             site_url=post.site_url,
         )
-        if report.ok:
+        if ai_risk == "likely_ai":
+            # AI 复检多轮重写仍未过：降级人工审核，不自动发布
+            blocked_reason = "ai_detected_rewrite_failed"
+        elif not report.ok:
+            blocked_reason = report.errors[0] if report.errors else "risk_blocked"
+        if blocked_reason:
+            post.status = "pending_review"
+        else:
             post.status = "approved"
             post.scheduled_at = planned_at
-        else:
-            # 风控不过：降级进待审队列人工兜底，动作记 skipped
-            post.status = "pending_review"
     else:
         post.status = "pending_review"
 
     db.add(post)
     db.commit()
     db.refresh(post)
+    record_activity(
+        db,
+        site_id=campaign.site_id,
+        account_id=account.id,
+        subreddit=subreddit,
+        angle=generated.get("angle"),
+        at=now or now_bj(),
+    )
 
     if campaign.content_mode == "auto" and post.status == "pending_review":
         action = _insert_action(
@@ -361,7 +487,7 @@ def _create_campaign_post(
             account_id=account.id,
             action_type="post",
             status="skipped",
-            skip_reason=(report.errors[0] if report.errors else "risk_blocked")[:200],
+            skip_reason=(blocked_reason or "risk_blocked")[:200],
             post_id=post.id,
             planned_at=planned_at,
             dedup_key=dedup_key,
@@ -387,12 +513,28 @@ def _create_campaign_post(
 
 # ============ 评论动作 ============
 def _comment_candidates(
-    db: Session, campaign: RedditCampaign, account: SocialAccount, limit: int = 4
+    db: Session,
+    campaign: RedditCampaign,
+    account: SocialAccount,
+    limit: int = 4,
+    *,
+    now: datetime | None = None,
+    apply_cooldown: bool = True,
 ) -> list[dict]:
     """自动发现评论目标：campaign 社区/人设社区中未互动过的讨论帖。"""
+    from app.services.reddit_community_rotation import order_subreddits
+
     subs = _target_subreddits(db, campaign, account)
     if not subs:
         return []
+    ordered = order_subreddits(
+        db,
+        account_id=account.id,
+        candidates=subs,
+        now=now or now_bj(),
+        limit=3,
+        apply_cooldown=apply_cooldown,
+    )
     terms: list[str] = []
     if campaign.product_id:
         product = db.get(RedditProduct, campaign.product_id)
@@ -423,7 +565,7 @@ def _comment_candidates(
 
     client = get_reddit_client_for_account(account)
     candidates: list[dict] = []
-    for sub in random.sample(subs, min(len(subs), 3)):
+    for sub in ordered:
         try:
             if terms:
                 keyword = random.choice(terms)
@@ -496,7 +638,12 @@ def _create_campaign_comment(
         report = check_comment_publish(
             db, site_id=campaign.site_id, account_id=account.id, body=comment.body
         )
-        if report.ok:
+        if comment.ai_risk == "likely_ai":
+            # AI 复检多轮重写仍未过：降级人工审核，不自动发布
+            comment.status = "pending_review"
+            status = "skipped"
+            skip_reason = "ai_detected_rewrite_failed"
+        elif report.ok:
             comment.status = "approved"
             comment.scheduled_at = planned_at
         else:
@@ -557,6 +704,8 @@ def _plan_related_upvotes(
     hour_end: int,
 ) -> int:
     """相关讨论帖点赞（养号互动）：搜索候选 → 过滤 → 随机账号计划投票。"""
+    from app.services.reddit_community_rotation import order_subreddits
+
     if remaining <= 0 or not pool:
         return 0
     searcher = random.choice(pool)
@@ -564,6 +713,9 @@ def _plan_related_upvotes(
     subs = _target_subreddits(db, campaign, searcher)
     if not subs:
         return 0
+    ordered_subs = order_subreddits(
+        db, account_id=searcher.id, candidates=subs, now=now, limit=3
+    )
 
     terms: list[str] = []
     if campaign.product_id:
@@ -577,7 +729,7 @@ def _plan_related_upvotes(
     pool_names = {(a.account_name or "").lower() for a in pool}
     cutoff = now_bj() - timedelta(days=UPVOTE_RELATED_MAX_AGE_DAYS)
     candidates: list[dict] = []
-    for sub in random.sample(subs, min(len(subs), 3)):
+    for sub in ordered_subs:
         try:
             if terms:
                 keyword = random.choice(terms)
@@ -613,6 +765,9 @@ def _plan_related_upvotes(
         if planned >= remaining or planned >= MAX_UPVOTE_PLANS_PER_TICK:
             break
         voter = random.choice(pool)
+        planned_at = _plan_time(db, voter.id, now, hour_start, hour_end)
+        if planned_at.date() != now.date():
+            continue  # 该账号今天排不进了：换下一个候选，不顺延到明天
         action = _insert_action(
             db,
             campaign_id=campaign.id,
@@ -622,7 +777,7 @@ def _plan_related_upvotes(
             status="pending",
             target_thing_id=cand["thing_id"],
             target_post_url=cand["url"],
-            planned_at=_plan_time(db, voter.id, now, hour_start, hour_end),
+            planned_at=planned_at,
             dedup_key=f"upvote:{voter.id}:{cand['thing_id']}",
         )
         if action:
@@ -689,6 +844,9 @@ def _plan_self_upvotes(
             )
             if already:
                 continue
+            planned_at = _plan_time(db, voter.id, now, hour_start, hour_end)
+            if planned_at.date() != now.date():
+                continue  # 该账号今天排不进了：换下一个投票账号
             action = _insert_action(
                 db,
                 campaign_id=campaign.id,
@@ -698,7 +856,7 @@ def _plan_self_upvotes(
                 status="pending",
                 target_thing_id=post.reddit_post_id,
                 target_post_url=post.reddit_permalink,
-                planned_at=_plan_time(db, voter.id, now, hour_start, hour_end),
+                planned_at=planned_at,
                 dedup_key=dedup_key,
             )
             if action:
@@ -764,14 +922,16 @@ def recover_stale_actions(db: Session, timeout_minutes: int = STALE_EXECUTING_MI
 
 
 def due_upvote_action_ids(db: Session, limit: int = 30) -> list[int]:
-    """到期待执行的点赞动作 ID。"""
+    """到期待执行的点赞动作 ID（仅 running campaign；暂停/结束的不再发放）。"""
     rows = (
         db.query(RedditCampaignAction.id)
+        .join(RedditCampaign, RedditCampaignAction.campaign_id == RedditCampaign.id)
         .filter(
             RedditCampaignAction.status == "pending",
             RedditCampaignAction.action_type.in_(_UPVOTE_TYPES),
             RedditCampaignAction.planned_at.isnot(None),
             RedditCampaignAction.planned_at <= now_bj(),
+            RedditCampaign.status == "running",
         )
         .order_by(RedditCampaignAction.planned_at.asc())
         .limit(limit)
@@ -882,8 +1042,11 @@ def execute_action(db: Session, action_id: int, attempt: int = 0) -> dict:
 
 # ============ tick 主流程 ============
 def _plan_posts(db: Session, campaign: RedditCampaign, pool, now, remaining, hour_start, hour_end, stats) -> int:
+    from app.services.reddit_community_rotation import per_sub_daily_cap, pool_is_small
+
     created = 0
     ai_budget, _ = _ai_budget_available(campaign.site_id)
+    daily_total = int(campaign.daily_posts or 0) + int(campaign.daily_comments or 0)
     for account in pool:
         if created >= remaining or created >= MAX_CONTENT_PER_TICK or not ai_budget:
             break
@@ -892,8 +1055,24 @@ def _plan_posts(db: Session, campaign: RedditCampaign, pool, now, remaining, hou
         if profile.daily_post_limit and usage["posts"] >= profile.daily_post_limit:
             stats["skipped"] += 1
             continue
+        planned_at = _plan_time(db, account.id, now, hour_start, hour_end)
+        if planned_at.date() != now.date():
+            continue  # 同账号间隔顺延越出今日窗口：留给明天自己的配额
+        subs = _target_subreddits(
+            db, campaign, account, include_promo=bool(campaign.product_id)
+        )
+        cap = per_sub_daily_cap(
+            daily_total=daily_total, n_accounts=len(pool), n_subs=len(subs)
+        )
+        apply_cd = not pool_is_small(n_accounts=len(pool), n_subs=len(subs))
         action, _skip = _create_campaign_post(
-            db, campaign, account, planned_at=_plan_time(db, account.id, now, hour_start, hour_end)
+            db,
+            campaign,
+            account,
+            planned_at=planned_at,
+            now=now,
+            daily_cap=cap,
+            apply_cooldown=apply_cd,
         )
         if action is None:
             continue  # 瞬时故障或 dedup 冲突，下个 tick 重试
@@ -907,6 +1086,8 @@ def _plan_posts(db: Session, campaign: RedditCampaign, pool, now, remaining, hou
 
 
 def _plan_comments(db: Session, campaign: RedditCampaign, pool, now, remaining, hour_start, hour_end, stats) -> int:
+    from app.services.reddit_community_rotation import pool_is_small
+
     created = 0
     ai_budget, _ = _ai_budget_available(campaign.site_id)
     for account in pool:
@@ -917,7 +1098,14 @@ def _plan_comments(db: Session, campaign: RedditCampaign, pool, now, remaining, 
         if profile.daily_comment_limit and usage["comments"] >= profile.daily_comment_limit:
             stats["skipped"] += 1
             continue
-        candidates = _comment_candidates(db, campaign, account)
+        planned_at = _plan_time(db, account.id, now, hour_start, hour_end)
+        if planned_at.date() != now.date():
+            continue  # 同账号间隔顺延越出今日窗口：留给明天自己的配额
+        subs = _target_subreddits(db, campaign, account)
+        apply_cd = not pool_is_small(n_accounts=len(pool), n_subs=len(subs))
+        candidates = _comment_candidates(
+            db, campaign, account, now=now, apply_cooldown=apply_cd
+        )
         if not candidates:
             continue
         candidate = random.choice(candidates)
@@ -925,7 +1113,7 @@ def _plan_comments(db: Session, campaign: RedditCampaign, pool, now, remaining, 
             db,
             campaign,
             account,
-            planned_at=_plan_time(db, account.id, now, hour_start, hour_end),
+            planned_at=planned_at,
             candidate=candidate,
         )
         if action is None:
@@ -943,6 +1131,10 @@ def _tick_campaign(db: Session, campaign: RedditCampaign, now: datetime) -> dict
         return stats
     hour_start = int(campaign.active_hour_start or 0)
     hour_end = int(23 if campaign.active_hour_end is None else campaign.active_hour_end)
+    # 今日活跃窗口已过：今天不再排新动作（把今天配额顺延进明天窗口会挤占
+    # 明天的一轮；且 end_date=今天的动作排到明天将永远没有机会执行）
+    if not _can_plan_today(now, hour_start, hour_end):
+        return stats
     quota = _quota_used(db, campaign.id, now)
 
     remaining_posts = max(0, int(campaign.daily_posts or 0) - quota["posts"])
@@ -962,17 +1154,85 @@ def _tick_campaign(db: Session, campaign: RedditCampaign, now: datetime) -> dict
     return stats
 
 
+TICK_HEARTBEAT_KEY = "heartbeat:reddit:campaign_tick"
+TICK_STALE_MINUTES = 20  # tick 计划 15 分钟一轮，超过 20 分钟无心跳视为停摆
+TICK_HEARTBEAT_TTL = 2 * 60 * 60  # beat 宕机后键自动过期，ops/告警显示 missing
+
+
+def write_campaign_heartbeat() -> None:
+    """写入全局 tick 心跳（Redis）。Redis 不可用时静默跳过，不影响调度主流程。"""
+    from app.utils.rate_limiter import get_redis
+
+    try:
+        get_redis().set(TICK_HEARTBEAT_KEY, now_bj().isoformat(), ex=TICK_HEARTBEAT_TTL)
+    except Exception:  # noqa: BLE001 — 心跳属可观测附属，失败只记 debug
+        logger.debug("campaign tick heartbeat write failed", exc_info=True)
+
+
+def read_campaign_tick_heartbeat() -> dict:
+    """读取 tick 心跳状态，供心跳告警任务与 ops 接口共用。
+
+    返回 {last_run_at, age_minutes, stale, reason}；stale=True 时 reason 给出原因。
+    """
+    from app.utils.rate_limiter import get_redis
+
+    try:
+        raw = get_redis().get(TICK_HEARTBEAT_KEY)
+    except Exception:  # noqa: BLE001
+        return {"last_run_at": None, "age_minutes": None, "stale": True, "reason": "redis_unavailable"}
+    if not raw:
+        return {"last_run_at": None, "age_minutes": None, "stale": True, "reason": "missing"}
+    try:
+        last = datetime.fromisoformat(raw.decode() if isinstance(raw, bytes) else str(raw))
+    except ValueError:
+        return {"last_run_at": None, "age_minutes": None, "stale": True, "reason": "corrupted"}
+    age_minutes = (now_bj() - last).total_seconds() / 60
+    stale = age_minutes > TICK_STALE_MINUTES
+    return {
+        "last_run_at": last.isoformat(),
+        "age_minutes": round(age_minutes, 1),
+        "stale": stale,
+        "reason": "stale" if stale else None,
+    }
+
+
 def run_campaign_tick(db: Session) -> dict:
     """tick 主入口：扫描活跃 campaign → 计划动作 → 对账 → 回收僵尸。"""
     now = now_bj()
     today = now.date()
     campaigns = db.query(RedditCampaign).filter(RedditCampaign.status == "running").all()
+
+    # 到期自动结束：end_date 已过的 running campaign 置 ended，避免永远悬挂在运行中
+    expired = [c for c in campaigns if c.end_date and c.end_date < today]
+    if expired:
+        for c in expired:
+            c.status = "ended"
+        try:
+            db.commit()
+            logger.info(
+                "Campaign auto-ended (end_date passed): ids=%s", [c.id for c in expired]
+            )
+        except Exception:  # noqa: BLE001 — 并发删除等场景不阻断本轮 tick
+            db.rollback()
+            expired = []
+        campaigns = [c for c in campaigns if c not in expired]
+
     active = [c for c in campaigns if c.start_date <= today <= c.end_date]
 
     reconcile_campaign_actions(db)
     recovered = recover_stale_actions(db)
     if recovered:
         logger.info("Campaign tick recovered %d stale actions", recovered)
+
+    # 表现反馈校准：低表现社区降权 + 冷却（幂等，冷却期内不重复罚分）
+    from app.services.reddit_community_rotation import apply_feedback_calibration
+
+    for site_id in {c.site_id for c in active}:
+        try:
+            apply_feedback_calibration(db, site_id=site_id, now=now)
+        except Exception:  # noqa: BLE001 — 校准失败不阻断调度
+            db.rollback()
+            logger.exception("Feedback calibration failed site=%s", site_id)
 
     summary = {"campaigns": len(active), "posts": 0, "comments": 0, "upvotes": 0, "skipped": 0}
     for campaign in active:
@@ -997,4 +1257,57 @@ def run_campaign_tick(db: Session) -> dict:
                 stats["upvotes"],
                 stats["skipped"],
             )
+    return summary
+
+
+# ============ 扩池：相似社区扩散（beat 每日执行 / 手动触发）============
+def run_community_expansion(db: Session, *, per_site_accounts: int = 2, max_new: int = 3) -> dict:
+    """对每个站点的 Reddit 账号，从优质人设社区扩散相似社区并校验入库。
+
+    仅处理已有人设社区、且能取到 Zernio 客户端的账号；单账号失败不影响其他。
+    """
+    from app.services.reddit_community_rotation import expand_similar_communities
+    from app.services.ai_writer import get_ai_client
+
+    summary = {"accounts": 0, "added": 0, "errors": 0}
+    site_ids = [r[0] for r in db.query(ClientSite.id).all()]
+    for site_id in site_ids:
+        accounts = (
+            db.query(SocialAccount)
+            .filter(
+                SocialAccount.site_id == site_id,
+                SocialAccount.platform == "reddit",
+                SocialAccount.is_active.is_(True),
+            )
+            .limit(per_site_accounts)
+            .all()
+        )
+        for account in accounts:
+            summary["accounts"] += 1
+            try:
+                profile = get_or_create_profile(db, site_id, account.id)
+                from app.services.reddit_persona import parse_persona
+
+                interests = parse_persona(profile.persona, config=profile.persona_config).interests
+                client = get_reddit_client_for_account(account)
+                try:
+                    ai = get_ai_client()
+                except Exception:  # noqa: BLE001 — 无 AI 时跳过扩散
+                    ai = None
+                added = expand_similar_communities(
+                    db,
+                    site_id=site_id,
+                    account_id=account.id,
+                    client=client,
+                    ai=ai,
+                    interests=interests,
+                    max_new=max_new,
+                )
+                summary["added"] += len(added)
+            except Exception:  # noqa: BLE001 — 单账号失败不阻断
+                db.rollback()
+                summary["errors"] += 1
+                logger.exception(
+                    "Community expansion failed site=%s account=%s", site_id, account.id
+                )
     return summary

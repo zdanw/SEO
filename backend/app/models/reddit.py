@@ -55,6 +55,8 @@ class RedditPost(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_intent: Mapped[str] = mapped_column(String(20), default="casual", nullable=False)
+    ai_risk: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ai_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     campaign_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("reddit_campaigns.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -92,6 +94,7 @@ class RedditComment(Base):
     discover_source: Mapped[str] = mapped_column(String(20), default="manual_url", nullable=False)
     content_intent: Mapped[str] = mapped_column(String(20), default="casual", nullable=False)
     ai_risk: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ai_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     brand_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("reddit_brands.id"), nullable=True, index=True
     )
@@ -188,6 +191,8 @@ class RedditCommunity(Base):
     best_hour_utc: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 海外活跃时段（UTC）
     priority: Mapped[int] = mapped_column(Integer, default=3, nullable=False)  # 1 最高
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # 扩池溯源：由哪个优质社区扩散发现（NULL = 手动/兴趣建议）
+    discovered_from: Mapped[str | None] = mapped_column(String(100), nullable=True)
     verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     exists: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     subscribers: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -431,3 +436,39 @@ class RedditVoteLog(Base):
 
 
 from app.models.social import SocialAccount  # noqa: E402
+
+
+class RedditCommunityActivity(Base):
+    """账号×社区活动账本：加权轮转 / 冷却 / 内容角度去重 / 表现降权的数据基础。
+
+    unique(account_id, subreddit) + upsert 避免重复行；recent_angles 保存最近使用过的
+    叙事角度（最近优先），用于同社区内的角度轮换与重复回避。
+    """
+
+    __tablename__ = "reddit_community_activity"
+    __table_args__ = (
+        UniqueConstraint("account_id", "subreddit", name="uq_community_activity_account_sub"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    site_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("client_sites.id"), nullable=False, index=True
+    )
+    account_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("social_accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    subreddit: Mapped[str] = mapped_column(String(100), nullable=False)
+    last_action_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    action_count_7d: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    action_count_30d: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 表现反馈降权（越大越少用）；cooldown_until 前不参与轮转
+    penalty: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    cooldown_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 最近使用的叙事角度（最近优先，最多 8 个）
+    recent_angles: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
+    )

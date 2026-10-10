@@ -53,10 +53,22 @@ class AiDetectionResult:
         }
 
 
-def detect_ai_content(content: str) -> AiDetectionResult:
-    """对正文执行混合 AI 检测，不可用时回退启发式规则。"""
+def _min_chars_for_type(content_type: str) -> int:
+    if content_type == "comment":
+        return settings.AI_DETECTOR_MIN_CHARS_COMMENT
+    if content_type == "post":
+        return settings.AI_DETECTOR_MIN_CHARS_POST
+    return settings.AI_DETECTOR_MIN_CHARS
+
+
+def detect_ai_content(content: str, *, content_type: str = "article") -> AiDetectionResult:
+    """对正文执行混合 AI 检测，不可用时回退启发式规则。
+
+    content_type: article | post | comment —— 决定最小字数门槛与统计检测可用性。
+    短文本（低于 lmscan 门槛）只走规则引擎 Signs of AI，避免统计特征不准。
+    """
     plain = _strip_markdown(content or "")
-    min_chars = settings.AI_DETECTOR_MIN_CHARS
+    min_chars = _min_chars_for_type(content_type)
 
     if len(plain) < min_chars:
         return AiDetectionResult(
@@ -67,10 +79,12 @@ def detect_ai_content(content: str) -> AiDetectionResult:
         )
 
     mode = (settings.AI_DETECTOR or "hybrid").lower()
+    statistical_min = settings.AI_DETECTOR_MIN_CHARS
+    short_text = len(plain) < statistical_min
     lmscan_data: dict[str, Any] | None = None
     signs_data: dict[str, Any] | None = None
 
-    if mode in ("hybrid", "lmscan"):
+    if not short_text and mode in ("hybrid", "lmscan"):
         lmscan_data = _run_lmscan(plain)
     if mode in ("hybrid", "signs_of_ai", "signs"):
         signs_data = _run_signs_of_ai(plain)
@@ -219,9 +233,9 @@ def _combine_results(
 
 
 def _score_to_verdict(score: float) -> str:
-    if score < 30:
+    if score < settings.AI_DETECTOR_HUMAN_MAX:
         return "human_like"
-    if score < 60:
+    if score < settings.AI_DETECTOR_MIXED_MAX:
         return "mixed"
     return "likely_ai"
 

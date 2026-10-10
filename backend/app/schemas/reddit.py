@@ -9,7 +9,7 @@ MANUAL_POST_TYPES: tuple[str, ...] = ("pitfall", "vent", "unpopular", "guide", "
 ReviewStatus = Literal[
     "draft", "pending_review", "approved", "rejected", "posting", "posted", "failed"
 ]
-DiscoverSource = Literal["manual_url", "keyword_search", "auto_discover"]
+DiscoverSource = Literal["manual_url", "keyword_search", "auto_discover", "campaign"]
 AccountRole = Literal["warmup", "seeding", "expert"]
 AccountStage = Literal[
     "warmup_week1_2", "warmup_week3_4", "ready", "active", "warning", "suspended"
@@ -24,6 +24,12 @@ class PersonaConfigIn(BaseModel):
     interests: list[str] = []
     quirks: str = ""
     never_say: str = ""
+    background: str = ""
+    life_facts: list[str] = []
+    signature_opinions: list[str] = []
+    recurring_themes: list[str] = []
+    # {subreddit: {voice/quirks/background/themes/life_facts}}
+    subreddit_overrides: dict[str, dict] = {}
 
 
 class RedditAccountOut(BaseModel):
@@ -108,6 +114,7 @@ class RedditCommunityOut(RedditCommunityBase):
     verify_error: Optional[str] = None
     rules_text: Optional[str] = None
     rules_fetched_at: Optional[datetime] = None
+    discovered_from: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -265,11 +272,17 @@ class RedditPostOut(BaseModel):
     status: ReviewStatus
     reddit_post_id: Optional[str] = None
     reddit_permalink: Optional[str] = None
+    campaign_id: Optional[int] = None
+    campaign_name: Optional[str] = None
     scheduled_at: Optional[datetime] = None
+    planned_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
     error_message: Optional[str] = None
     content_intent: ContentIntent = "promo"
+    ai_risk: Optional[str] = None
+    ai_score: Optional[float] = None
     account_name: Optional[str] = None
+    queue_no: Optional[int] = None  # 审核队列序号：账号内按创建顺序编号
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
@@ -320,16 +333,21 @@ class RedditCommentOut(BaseModel):
     discover_source: DiscoverSource
     content_intent: ContentIntent = "casual"
     ai_risk: Optional[str] = None
+    ai_score: Optional[float] = None
     brand_id: Optional[int] = None
     product_id: Optional[int] = None
     brand_name: Optional[str] = None
     product_name: Optional[str] = None
     status: ReviewStatus
     reddit_comment_id: Optional[str] = None
+    campaign_id: Optional[int] = None
+    campaign_name: Optional[str] = None
     scheduled_at: Optional[datetime] = None
+    planned_at: Optional[datetime] = None
     published_at: Optional[datetime] = None
     error_message: Optional[str] = None
     account_name: Optional[str] = None
+    queue_no: Optional[int] = None  # 审核队列序号：账号内按创建顺序编号
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)

@@ -67,9 +67,15 @@ class Settings(BaseSettings):
 
     # AI 内容检测：hybrid | lmscan | signs_of_ai | heuristic
     AI_DETECTOR: str = "hybrid"
-    AI_DETECTOR_MIN_CHARS: int = 200
+    AI_DETECTOR_MIN_CHARS: int = 200  # 统计检测(lmscan)可用的最短字符数
+    AI_DETECTOR_MIN_CHARS_COMMENT: int = 40  # 短评论走规则引擎的最低字符数
+    AI_DETECTOR_MIN_CHARS_POST: int = 120  # 帖子走规则引擎的最低字符数
     AI_DETECTOR_LMSCAN_WEIGHT: float = 0.6
     AI_DETECTOR_SIGNS_WEIGHT: float = 0.4
+    AI_DETECTOR_HUMAN_MAX: float = 30  # < 该分判 human_like
+    AI_DETECTOR_MIXED_MAX: float = 60  # < 该分判 mixed，否则 likely_ai
+    # 发布前对最终正文做 AI 复检，命中 likely_ai 则退回待审（防止审批后被编辑污染）
+    REDDIT_PUBLISH_AI_RECHECK: bool = True
 
     # SERP 抓取：ScrapingBee Google Search API（优先于代理池）
     SCRAPINGBEE_API_KEY: Optional[str] = None

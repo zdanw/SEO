@@ -21,7 +21,7 @@
         <template #default="{ row }">{{ row.start_date }} ~ {{ row.end_date }}</template>
       </el-table-column>
       <el-table-column label="活跃时段(北京时间)" width="130">
-        <template #default="{ row }">{{ row.active_hour_start }}:00 - {{ row.active_hour_end }}:00</template>
+        <template #default="{ row }">{{ row.active_hour_start }}:00 - {{ row.active_hour_end }}:59</template>
       </el-table-column>
       <el-table-column label="模式" width="84">
         <template #default="{ row }">
@@ -30,7 +30,15 @@
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="今日进度 (发帖/评论/点赞)" min-width="200">
+      <el-table-column min-width="200">
+        <template #header>
+          <span class="col-header">
+            今日计划 (发帖/评论/点赞)
+            <el-tooltip content="统计计划在今日执行的动作（按排期时间归属当日，含待审核/待执行），非实际已完成数；当日窗口已过则今天不再补排，明天会排满自己的一轮" placement="top">
+              <el-icon class="header-help"><QuestionFilled /></el-icon>
+            </el-tooltip>
+          </span>
+        </template>
         <template #default="{ row }">
           <span :class="{ quota_done: row.today_posts >= row.daily_posts }">{{ row.today_posts }}/{{ row.daily_posts }}</span>
           <el-divider direction="vertical" />
@@ -74,7 +82,7 @@
           <el-input-number v-model="form.active_hour_start" :min="0" :max="23" controls-position="right" />
           <span class="sep">至</span>
           <el-input-number v-model="form.active_hour_end" :min="0" :max="23" controls-position="right" />
-          <span class="sep hint-inline">执行时间将随机分布在该时段内</span>
+          <span class="sep hint-inline">执行时间随机分布在该时段内（含结束小时，如 14-16 表示最晚 16:59）；结束小于开始时视为跨午夜（次日结束）</span>
         </el-form-item>
         <el-form-item label="内容模式">
           <el-radio-group v-model="form.content_mode">
@@ -127,6 +135,7 @@
           <el-option v-for="(label, key) in ACTION_TYPES" :key="key" :label="label" :value="key" />
         </el-select>
         <el-button size="small" :icon="Refresh" @click="loadActions">刷新</el-button>
+        <span v-if="actions.length >= 200" class="hint">最多显示最近 200 条，可用筛选缩小范围</span>
       </div>
       <el-table v-loading="actionsLoading" :data="actions" size="small" stripe>
         <el-table-column label="类型" width="110">
@@ -169,7 +178,7 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh } from '@element-plus/icons-vue'
+import { Plus, QuestionFilled, Refresh } from '@element-plus/icons-vue'
 import {
   type RedditCampaign,
   type RedditCampaignAction,
@@ -386,12 +395,22 @@ async function start(row: RedditCampaign) {
     await startCampaign(row.id)
     ElMessage.success('已启动')
     await load()
+    openActions(row) // 直接展示首批排期结果，便于确认调度已生效
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '启动失败')
   }
 }
 
 async function pause(row: RedditCampaign) {
+  try {
+    await ElMessageBox.confirm(
+      `暂停后，该 Campaign 已排期但未执行的动作（发帖/评论/点赞）将暂停发放，重新启动后继续。已进入待审队列的内容不受影响。`,
+      '确认暂停',
+      { type: 'warning', confirmButtonText: '暂停', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
   try {
     await pauseCampaign(row.id)
     ElMessage.success('已暂停')
@@ -403,7 +422,11 @@ async function pause(row: RedditCampaign) {
 
 async function remove(row: RedditCampaign) {
   try {
-    await ElMessageBox.confirm(`删除 Campaign「${row.name}」？其执行记录将一并删除。`, '确认', { type: 'warning' })
+    await ElMessageBox.confirm(
+      `删除 Campaign「${row.name}」？其执行记录将一并删除，已生成的帖子/评论将保留但脱离该 Campaign，此操作不可恢复。`,
+      '确认删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
   } catch {
     return
   }
@@ -443,7 +466,7 @@ function openActions(row: RedditCampaign) {
 async function retry(row: RedditCampaignAction) {
   try {
     await retryCampaignAction(row.id)
-    ElMessage.success('已重新入队')
+    ElMessage.success(row.action_type === 'post' || row.action_type === 'comment' ? '已重新排队，关联内容将自动发布' : '已重新排队')
     await loadActions()
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '重试失败')
@@ -479,6 +502,15 @@ onMounted(() => {
 .quota_done {
   color: var(--el-color-success);
   font-weight: 600;
+}
+.col-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.header-help {
+  color: var(--el-text-color-secondary);
+  cursor: help;
 }
 .quota-row {
   display: flex;

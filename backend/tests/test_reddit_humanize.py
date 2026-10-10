@@ -54,3 +54,41 @@ def test_typo_pairs_differ_by_account_seed():
 def test_typo_pairs_none_seed_is_stable():
     assert typo_pairs_for_seed(None) == typo_pairs_for_seed(0)
     assert typo_pairs_for_seed(None) == typo_pairs_for_seed(None)
+
+
+def test_replace_ai_tells_softens_phrases():
+    from app.services.reddit_humanize import replace_ai_tells
+
+    out = replace_ai_tells(
+        "It is important to note that we leverage robust solutions. "
+        "Furthermore, in order to succeed, you should delve into the details."
+    ).lower()
+    assert "important to note" not in out
+    assert "leverage" not in out
+    assert "robust" not in out
+    assert "furthermore" not in out
+    assert "in order to" not in out
+    assert "delve into" not in out
+
+
+def test_vary_sentence_rhythm_splits_long_sentence():
+    from app.services.reddit_humanize import vary_sentence_rhythm
+
+    long = (
+        "I went to the store, grabbed a few things I did not really need, "
+        "waited in a long line, and then drove all the way back home only to realize "
+        "that I had forgotten the one item I actually went there for."
+    )
+    out = vary_sentence_rhythm(long, seed=5)
+    assert out.count(".") >= 2
+
+
+def test_humanize_post_no_typos_and_no_em_dash():
+    from app.services.reddit_humanize import humanize_post
+
+    out = humanize_post("I tried this — it failed. But I kept going anyway.", seed=1)
+    assert "—" not in out
+    assert "I tried this" in out
+    # 帖子不做笔误注入，原文词组可逐字找到
+    assert "kept going" in out
+

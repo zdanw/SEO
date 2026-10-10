@@ -14,6 +14,11 @@ export interface PersonaConfig {
   interests?: string[]
   quirks?: string
   never_say?: string
+  background?: string
+  life_facts?: string[]
+  signature_opinions?: string[]
+  recurring_themes?: string[]
+  subreddit_overrides?: Record<string, Record<string, unknown>>
 }
 
 export interface RedditAccount {
@@ -65,11 +70,17 @@ export interface RedditPost {
   status: ReviewStatus
   reddit_post_id?: string | null
   reddit_permalink?: string | null
+  campaign_id?: number | null
+  campaign_name?: string | null
   scheduled_at?: string | null
+  planned_at?: string | null
   published_at?: string | null
   error_message?: string | null
   content_intent?: ContentIntent
+  ai_risk?: string | null
+  ai_score?: number | null
   account_name?: string | null
+  queue_no?: number | null
   created_at: string
   updated_at: string
 }
@@ -87,16 +98,21 @@ export interface RedditComment {
   discover_source: string
   content_intent?: ContentIntent
   ai_risk?: string | null
+  ai_score?: number | null
   brand_id?: number | null
   product_id?: number | null
   brand_name?: string | null
   product_name?: string | null
   status: ReviewStatus
   reddit_comment_id?: string | null
+  campaign_id?: number | null
+  campaign_name?: string | null
   scheduled_at?: string | null
+  planned_at?: string | null
   published_at?: string | null
   error_message?: string | null
   account_name?: string | null
+  queue_no?: number | null
   created_at: string
   updated_at: string
 }
@@ -129,6 +145,7 @@ export interface RedditCommunity {
   is_active: boolean
   exists?: boolean | null
   verify_error?: string | null
+  discovered_from?: string | null
   created_at: string
   updated_at: string
 }

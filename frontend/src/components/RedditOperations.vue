@@ -62,9 +62,7 @@
     <el-tabs v-model="innerTab" type="card" style="margin-top: 16px" @tab-change="onTabChange">
       <!-- 发帖 -->
       <el-tab-pane label="发帖审核" name="posts">
-        <el-row :gutter="16">
-          <el-col :span="10">
-            <el-form label-position="top">
+        <el-form label-position="top" style="max-width: 560px">
               <el-form-item label="写法">
                 <el-radio-group v-model="postForm.post_type" class="post-type-radios">
                   <el-radio value="auto">
@@ -176,10 +174,10 @@
               <el-button type="primary" :loading="postGenerating" :disabled="!selectedAccountId" @click="handleGeneratePost">
                 AI 生成并入审核队列
               </el-button>
-            </el-form>
-          </el-col>
-          <el-col :span="14">
-            <div class="list-header">
+        </el-form>
+
+        <el-divider />
+        <div class="list-header">
               <span>审核队列（当前账号）</span>
               <el-select v-model="postStatusFilter" clearable placeholder="状态" style="width: 130px" @change="loadPosts">
                 <el-option label="待审核" value="pending_review" />
@@ -189,7 +187,7 @@
               </el-select>
             </div>
             <el-table :data="posts" v-loading="postsLoading" size="small" stripe max-height="480">
-              <el-table-column prop="id" label="ID" width="50" />
+              <el-table-column prop="queue_no" label="ID" width="50" />
               <el-table-column prop="post_type" label="类型" width="78">
                 <template #default="{ row }">{{ postTypeLabel(row.post_type) }}</template>
               </el-table-column>
@@ -198,18 +196,39 @@
                   <el-tag size="small" :type="row.content_intent === 'promo' ? 'warning' : 'info'">{{ intentLabel(row.content_intent) }}</el-tag>
                 </template>
               </el-table-column>
+              <el-table-column label="AI" width="78">
+                <template #default="{ row }">
+                  <el-tag v-if="row.ai_risk === 'likely_ai'" size="small" type="danger">疑似</el-tag>
+                  <el-tag v-else-if="row.ai_risk === 'mixed'" size="small" type="warning">偏AI</el-tag>
+                  <span v-else class="muted">—</span>
+                  <span v-if="row.ai_score != null" class="muted ai-score">{{ Math.round(row.ai_score) }}</span>
+                </template>
+              </el-table-column>
               <el-table-column label="关键词" min-width="120" show-overflow-tooltip>
                 <template #default="{ row }">
                   <span v-if="row.keyword">{{ row.keyword }}</span>
                   <span v-else class="muted">—</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="title" label="标题" min-width="150" show-overflow-tooltip />
+              <el-table-column label="标题" min-width="150">
+                <template #default="{ row }">
+                  <div class="title-cell">{{ row.title }}</div>
+                  <div v-if="row.campaign_name" class="campaign-line">
+                    <el-tag size="small" type="warning" effect="plain">Campaign：{{ row.campaign_name }}</el-tag>
+                    <span v-if="row.planned_at" class="muted">计划 {{ formatTime(row.planned_at) }}</span>
+                  </div>
+                </template>
+              </el-table-column>
               <el-table-column label="定时" width="90">
                 <template #default="{ row }">
                   <span v-if="row.scheduled_at">{{ formatTime(row.scheduled_at) }}</span>
                   <span v-else-if="row.published_at" class="muted">{{ formatTime(row.published_at) }}</span>
                   <span v-else class="muted">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="创建时间" width="90">
+                <template #default="{ row }">
+                  <span class="muted">{{ formatTime(row.created_at) }}</span>
                 </template>
               </el-table-column>
               <el-table-column prop="status" label="状态" width="84">
@@ -247,8 +266,6 @@
                 </template>
               </el-table-column>
             </el-table>
-          </el-col>
-        </el-row>
       </el-tab-pane>
 
       <!-- 评论 -->
@@ -412,8 +429,16 @@
           </el-select>
         </div>
         <el-table :data="comments" v-loading="commentsLoading" size="small" stripe max-height="360">
-          <el-table-column prop="id" label="ID" width="50" />
-          <el-table-column prop="target_post_title" label="目标帖" min-width="160" show-overflow-tooltip />
+          <el-table-column prop="queue_no" label="ID" width="50" />
+          <el-table-column label="目标帖" min-width="160">
+            <template #default="{ row }">
+              <div class="title-cell">{{ row.target_post_title || row.target_post_url }}</div>
+              <div v-if="row.campaign_name" class="campaign-line">
+                <el-tag size="small" type="warning" effect="plain">Campaign：{{ row.campaign_name }}</el-tag>
+                <span v-if="row.planned_at" class="muted">计划 {{ formatTime(row.planned_at) }}</span>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="body" label="评论预览" min-width="200" show-overflow-tooltip />
           <el-table-column label="意图" width="70">
             <template #default="{ row }">
@@ -429,6 +454,11 @@
               <el-tag v-else-if="row.ai_risk === 'brand_leak'" size="small" type="warning">含品牌</el-tag>
               <el-tag v-else-if="row.ai_risk === 'mixed'" size="small" type="warning">偏AI</el-tag>
               <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="创建时间" width="90">
+            <template #default="{ row }">
+              <span class="muted">{{ formatTime(row.created_at) }}</span>
             </template>
           </el-table-column>
           <el-table-column prop="status" label="状态" width="90">
@@ -771,6 +801,36 @@
         <el-form-item label="不要出现的口吻">
           <el-input v-model="profileForm.never_say" placeholder="sales pitch, expert lecture" />
         </el-form-item>
+        <el-form-item label="背景故事">
+          <el-input
+            v-model="profileForm.background"
+            type="textarea"
+            :rows="2"
+            placeholder="Moved cities twice for work; raising two kids."
+          />
+        </el-form-item>
+        <el-form-item label="生活细节（逗号分隔，每次生成轮换注入 1 条）">
+          <el-input
+            v-model="profileForm.lifeFactsText"
+            type="textarea"
+            :rows="2"
+            placeholder="drives a 12-year-old hatchback, brews coffee before 6am"
+          />
+        </el-form-item>
+        <el-form-item label="固定立场（逗号分隔）">
+          <el-input v-model="profileForm.opinionsText" placeholder="most parenting advice is overpriced" />
+        </el-form-item>
+        <el-form-item label="长期主题（逗号分隔）">
+          <el-input v-model="profileForm.themesText" placeholder="budgeting, weekend routines" />
+        </el-form-item>
+        <el-form-item label="按社区微调（JSON，可选）">
+          <el-input
+            v-model="profileForm.overridesText"
+            type="textarea"
+            :rows="3"
+            placeholder='{"Coffee": {"voice": "obsessive home barista", "life_facts": ["roasts beans on Sundays"]}}'
+          />
+        </el-form-item>
         <el-row :gutter="12">
           <el-col :span="12">
             <el-form-item label="每日发帖上限">
@@ -1040,6 +1100,7 @@ const profileSaving = ref(false)
 const profileForm = reactive({
   accountId: 0, role: 'warmup' as string, stage: 'warmup_week1_2' as string,
   karma: 0, persona: '', voice: '', interestsText: '', quirks: '', never_say: '',
+  background: '', lifeFactsText: '', opinionsText: '', themesText: '', overridesText: '',
   daily_post_limit: 0, daily_comment_limit: 10,
 })
 
@@ -1581,7 +1642,7 @@ function intentLabel(v?: string | null) {
   return v === 'promo' ? '产品' : '人设'
 }
 function sourceLabel(v?: string | null) {
-  return { auto_discover: '自动', keyword_search: '搜索', manual_url: 'URL' }[v || ''] || v || '-'
+  return { auto_discover: '自动', keyword_search: '搜索', manual_url: 'URL', campaign: '活动' }[v || ''] || v || '-'
 }
 function splitComma(text: string) {
   return text.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
@@ -1612,12 +1673,31 @@ function openProfileEdit(row: RedditAccount) {
   profileForm.interestsText = (cfg.interests || []).join(', ')
   profileForm.quirks = cfg.quirks || ''
   profileForm.never_say = cfg.never_say || ''
+  profileForm.background = cfg.background || ''
+  profileForm.lifeFactsText = (cfg.life_facts || []).join(', ')
+  profileForm.opinionsText = (cfg.signature_opinions || []).join(', ')
+  profileForm.themesText = (cfg.recurring_themes || []).join(', ')
+  profileForm.overridesText = cfg.subreddit_overrides
+    ? JSON.stringify(cfg.subreddit_overrides, null, 2)
+    : ''
   profileForm.daily_post_limit = row.daily_post_limit ?? 0
   profileForm.daily_comment_limit = row.daily_comment_limit ?? 10
   profileDialog.value = true
 }
 
 async function saveProfile() {
+  let overrides: Record<string, Record<string, unknown>> | undefined
+  const rawOverrides = profileForm.overridesText.trim()
+  if (rawOverrides) {
+    try {
+      const parsed = JSON.parse(rawOverrides)
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not-object')
+      overrides = parsed as Record<string, Record<string, unknown>>
+    } catch {
+      ElMessage.error('「按社区微调」必须是合法的 JSON 对象')
+      return
+    }
+  }
   profileSaving.value = true
   try {
     const voice = profileForm.voice.trim()
@@ -1631,6 +1711,11 @@ async function saveProfile() {
         interests: splitComma(profileForm.interestsText),
         quirks: profileForm.quirks,
         never_say: profileForm.never_say,
+        background: profileForm.background.trim(),
+        life_facts: splitComma(profileForm.lifeFactsText),
+        signature_opinions: splitComma(profileForm.opinionsText),
+        recurring_themes: splitComma(profileForm.themesText),
+        subreddit_overrides: overrides,
       },
       daily_post_limit: profileForm.daily_post_limit,
       daily_comment_limit: profileForm.daily_comment_limit,
@@ -1845,6 +1930,8 @@ function onTabChange(name: string | number) {
 .stat-label { font-size: 12px; color: #909399; }
 .stat-danger { color: #f56c6c; }
 .muted { color: #909399; }
+.title-cell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.campaign-line { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 12px; }
 .rules-cell { display: inline; margin-right: 4px; }
 .rules-full {
   white-space: pre-wrap;

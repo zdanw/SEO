@@ -12,11 +12,19 @@ from datetime import datetime, timedelta
 from app.core.timeutil import now_bj
 
 from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
+from app.core.config import settings
 from app.core.database import SessionLocal
-from app.models.reddit import RedditAccountProfile, RedditComment, RedditPost, RedditPostMetric
+from app.models.reddit import (
+    RedditAccountProfile,
+    RedditCampaign,
+    RedditComment,
+    RedditPost,
+    RedditPostMetric,
+)
 from app.services.reddit_publish import (
     publish_comment_now,
     publish_post_now,
@@ -60,6 +68,40 @@ def _clear_enqueue_lock(kind: str, item_id: int) -> None:
         get_redis().delete(f"enqueue:reddit:publish:{kind}:{item_id}")
     except Exception:
         logger.debug("clear enqueue lock failed kind=%s id=%s", kind, item_id, exc_info=True)
+
+
+def _ai_recheck_blocks(db: Session, *, kind: str, item_id: int) -> bool:
+    """发布前对最终正文复检 AI 特征；命中且此前未标记时退回待审。
+
+    只拦「生成时没问题、审批后被编辑引入 AI 味」的内容；人工明知 likely_ai 仍批准的不再拦截，
+    避免反复退回。
+    """
+    if not settings.REDDIT_PUBLISH_AI_RECHECK:
+        return False
+    from app.services.ai_detector import detect_ai_content
+
+    model = RedditPost if kind == "post" else RedditComment
+    obj = db.query(model).filter(model.id == item_id).first()
+    if obj is None:
+        return False
+    if kind == "post":
+        text = f"{obj.title}\n\n{obj.body}"
+        content_type = "post"
+    else:
+        text = obj.body
+        content_type = "comment"
+    result = detect_ai_content(text, content_type=content_type)
+    if result.verdict == "likely_ai" and obj.ai_risk != "likely_ai":
+        obj.ai_risk = "likely_ai"
+        obj.ai_score = float(result.score)
+        obj.status = "pending_review"
+        obj.error_message = f"发布前 AI 复检未通过（{float(result.score):.0f} 分），已退回待审"
+        db.commit()
+        logger.info(
+            "Publish AI recheck blocked %s #%s score=%.1f", kind, item_id, float(result.score)
+        )
+        return True
+    return False
 
 
 def _mark_post_timeout(db: Session, post_id: int) -> None:
@@ -217,33 +259,52 @@ def publish_scheduled_reddit_content() -> dict:
     skipped_comments = 0
     try:
         now = now_bj()
+        # campaign 内容仅在其 campaign 处于 running 时发放（暂停/结束即停）；普通内容（campaign_id 为空）不受影响
+        _campaign_gate = or_(
+            RedditPost.campaign_id.is_(None),
+            RedditCampaign.status == "running",
+        )
         posts = (
             db.query(RedditPost.id)
+            .outerjoin(RedditCampaign, RedditPost.campaign_id == RedditCampaign.id)
             .filter(
                 RedditPost.status == "approved",
                 RedditPost.scheduled_at.isnot(None),
                 RedditPost.scheduled_at <= now,
+                _campaign_gate,
             )
             .limit(20)
             .all()
         )
         for (post_id,) in posts:
+            if _ai_recheck_blocks(db, kind="post", item_id=post_id):
+                skipped_posts += 1
+                continue
             if try_enqueue_publish("post", post_id, publish_reddit_post_by_id):
                 queued_posts += 1
             else:
                 skipped_posts += 1
 
+        _campaign_gate_c = or_(
+            RedditComment.campaign_id.is_(None),
+            RedditCampaign.status == "running",
+        )
         comments = (
             db.query(RedditComment.id)
+            .outerjoin(RedditCampaign, RedditComment.campaign_id == RedditCampaign.id)
             .filter(
                 RedditComment.status == "approved",
                 RedditComment.scheduled_at.isnot(None),
                 RedditComment.scheduled_at <= now,
+                _campaign_gate_c,
             )
             .limit(50)
             .all()
         )
         for (comment_id,) in comments:
+            if _ai_recheck_blocks(db, kind="comment", item_id=comment_id):
+                skipped_comments += 1
+                continue
             if try_enqueue_publish("comment", comment_id, publish_reddit_comment_by_id):
                 queued_comments += 1
             else:

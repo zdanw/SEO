@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.services.ai_detector import AiDetectionResult, detect_ai_content
 from app.services.ai_writer import DeepSeekClient
-from app.services.reddit_humanize import humanize_comment
+from app.services.reddit_humanize import humanize_comment, humanize_post
 from app.services.reddit_mix import casual_mentions_brand
 from app.services.reddit_style import record_detection_patterns
 
@@ -27,6 +27,16 @@ class GeneratedComment:
     ai_score_before_humanize: float | None = None
     ai_score_after_humanize: float | None = None
     score_rounds: list[tuple[float, float]] = field(default_factory=list)
+
+
+@dataclass
+class GeneratedPost:
+    title: str
+    body: str
+    ai_risk: str  # ok | mixed | likely_ai
+    rewrite_count: int = 0
+    ai_score_before_humanize: float | None = None
+    ai_score_after_humanize: float | None = None
 
 
 def build_revision_notes(detection: AiDetectionResult) -> str:
@@ -94,6 +104,7 @@ def generate_comment_pipeline(
     seed: int | None = None,
     community_examples: list[dict[str, str]] | None = None,
     site_id: int | None = None,
+    angle_hint: str = "",
 ) -> GeneratedComment:
     if site_id is None:
         logger.warning("generate_comment_pipeline called without site_id; pattern bank disabled")
@@ -128,11 +139,12 @@ def generate_comment_pipeline(
             revision_notes=revision_notes or None,
             community_examples=community_examples,
             site_id=site_id,
+            angle_hint=angle_hint,
         )
         rewrites = attempt
 
         raw = body
-        before = detect_ai_content(raw)
+        before = detect_ai_content(raw, content_type="comment")
         before_score = float(before.score)
         if score_before is None:
             score_before = before_score
@@ -145,7 +157,7 @@ def generate_comment_pipeline(
             brand_names=tuple(brands),
             max_typos=max_typos,
         )
-        after = detect_ai_content(body)
+        after = detect_ai_content(body, content_type="comment")
         after_score = float(after.score)
         score_after = after_score
         score_rounds.append((before_score, after_score))
@@ -189,6 +201,105 @@ def generate_comment_pipeline(
     )
 
 
+def generate_post_pipeline(
+    ai: DeepSeekClient,
+    *,
+    post_type: str,
+    subreddit: str,
+    keyword: str,
+    site_url: str | None = None,
+    persona_prompt: str = "",
+    product_brief: dict | None = None,
+    allow_product: bool = False,
+    community_rules: str | None = None,
+    avoid_titles: list[str] | None = None,
+    community_examples: list[dict[str, str]] | None = None,
+    seed: int | None = None,
+    site_id: int | None = None,
+    angle_hint: str = "",
+) -> GeneratedPost:
+    """帖子生成流水线：AI 写稿 → 真人化 → AI 检测（失败则带诊断重写，最多 2 轮）。
+
+    与评论不同，帖子不做品牌闸（产品提及由 prompt 与 allow_product 控制）。
+    重写耗尽仍判 likely_ai 时，risk 保留 likely_ai，交由上层降级为人工审核。
+    """
+    if site_id is None:
+        logger.warning("generate_post_pipeline called without site_id; pattern bank disabled")
+
+    brands: list[str] = []
+    if product_brief and product_brief.get("brand"):
+        brands.append(str(product_brief["brand"]))
+    brief_for_model = product_brief if allow_product else None
+    base_seed = 0 if seed is None else seed
+
+    title = ""
+    body = ""
+    risk = "ok"
+    rewrites = 0
+    revision_notes = ""
+    score_before: float | None = None
+    score_after: float | None = None
+
+    for attempt in range(2):
+        generated = ai.generate_reddit_post(
+            post_type=post_type,
+            subreddit=subreddit,
+            keyword=keyword,
+            site_url=site_url,
+            persona_prompt=persona_prompt,
+            product_brief=brief_for_model,
+            allow_product=allow_product,
+            community_rules=community_rules,
+            avoid_titles=avoid_titles,
+            community_examples=community_examples,
+            revision_notes=revision_notes or None,
+            site_id=site_id,
+            angle_hint=angle_hint,
+        )
+        rewrites = attempt
+
+        raw_title = generated["title"]
+        raw_body = generated["body"]
+
+        before = detect_ai_content(f"{raw_title}\n\n{raw_body}", content_type="post")
+        before_score = float(before.score)
+        if score_before is None:
+            score_before = before_score
+        if before.verdict in {"mixed", "likely_ai"}:
+            record_detection_patterns(before.signs_of_ai, site_id=site_id, brand_names=brands)
+
+        title = humanize_post(raw_title, seed=base_seed + attempt)
+        body = humanize_post(raw_body, seed=base_seed + attempt + 101)
+        after = detect_ai_content(f"{title}\n\n{body}", content_type="post")
+        after_score = float(after.score)
+        score_after = after_score
+        if after_score > before_score + 1:
+            logger.warning(
+                "post humanize raised AI score site=%s sub=%s: %.1f -> %.1f",
+                site_id,
+                subreddit,
+                before_score,
+                after_score,
+            )
+        if after.verdict in {"mixed", "likely_ai"}:
+            record_detection_patterns(after.signs_of_ai, site_id=site_id, brand_names=brands)
+
+        if after.verdict != "likely_ai":
+            risk = _verdict_to_risk(after.verdict)
+            break
+        risk = "likely_ai"
+        revision_notes = build_revision_notes(after)
+
+    return GeneratedPost(
+        title=title,
+        body=body,
+        ai_risk=risk,
+        rewrite_count=rewrites,
+        ai_score_before_humanize=score_before,
+        ai_score_after_humanize=score_after,
+    )
+
+
 def _product_brief(brand, product) -> dict:
     """产品卖点 brief（与 API 层 _brief_from_product 同构）。"""
     return {
@@ -213,6 +324,7 @@ def generate_post_content(
     include_site_url: bool = False,
     brand_id: int | None = None,
     product_id: int | None = None,
+    angle_tag: str | None = None,
 ) -> dict:
     """帖子生成核心（API 与 Campaign 共用）：AI 写稿，只生成不落库。
 
@@ -228,6 +340,11 @@ def generate_post_content(
     from app.models.reddit import RedditBrand, RedditPost, RedditProduct, RedditProductKeyword
     from app.services.ai_writer import get_ai_client
     from app.services.reddit_client import get_reddit_client_for_account, normalize_subreddit
+    from app.services.reddit_community_rotation import (
+        angle_hint as _angle_hint,
+        pick_angle,
+        recent_angles,
+    )
     from app.services.reddit_discover import pick_promo_search_keyword, product_search_terms
     from app.services.reddit_mix import resolve_post_intent
     from app.services.reddit_style import fetch_community_examples
@@ -244,7 +361,8 @@ def generate_post_content(
         allow_product=allow_product,
     )
 
-    persona_prompt = _persona_prompt_for(db, site.id, account.id)
+    if angle_tag is None:
+        angle_tag = pick_angle(recent_angles(db, account.id, subreddit))
     product_brief = None
     keyword = ""
     if allow_product and product_id:
@@ -292,7 +410,11 @@ def generate_post_content(
     ai = get_ai_client()
     client = get_reddit_client_for_account(account)
     community_examples = fetch_community_examples(client, subreddit)
-    generated = ai.generate_reddit_post(
+    persona_prompt = _persona_prompt_for(
+        db, site.id, account.id, subreddit=subreddit, seed=account.id + len(recent_titles)
+    )
+    generated = generate_post_pipeline(
+        ai,
         post_type=post_type,
         subreddit=subreddit,
         keyword=keyword,
@@ -303,13 +425,18 @@ def generate_post_content(
         community_rules=_rules_text_for_subreddit(db, site.id, subreddit, account_id=account.id),
         avoid_titles=recent_titles,
         community_examples=community_examples,
+        seed=account.id + len(recent_titles),
         site_id=site.id,
+        angle_hint=_angle_hint(angle_tag),
     )
     return {
-        "title": generated["title"],
-        "body": generated["body"],
+        "title": generated.title,
+        "body": generated.body,
         "keyword": keyword,
         "site_url": site_url,
         "intent": intent,
         "subreddit": normalize_subreddit(subreddit),
+        "angle": angle_tag,
+        "ai_risk": generated.ai_risk,
+        "ai_score": generated.ai_score_after_humanize,
     }

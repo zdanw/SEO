@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from app.core.timeutil import now_bj
+
+import logging
+
+from app.core.timeutil import as_bj_naive, now_bj
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -96,6 +99,12 @@ from app.services.reddit_mix import (
 )
 from app.services.reddit_persona import parse_persona
 from app.services import reddit_oauth
+from app.tasks.reddit_campaign_tasks import trigger_campaign_tick
+from app.tasks.reddit_tasks import (
+    publish_reddit_comment_by_id,
+    publish_reddit_post_by_id,
+    try_enqueue_publish,
+)
 from app.services.reddit_publish import (
     force_fail_comment,
     force_fail_post,
@@ -114,6 +123,8 @@ from app.services.zernio_client import ZernioError
 from app.services.zernio_keys import is_zernio_ready, list_all_keys, list_enabled_keys, mask_api_key
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 _EDITABLE_STATUSES = {"draft", "pending_review", "approved", "failed"}
 
@@ -210,7 +221,14 @@ def _fetch_community_rules(
     return fetch_subreddit_rules(name)
 
 
-def _persona_prompt_for(db: Session, site_id: int, account_id: int) -> str:
+def _persona_prompt_for(
+    db: Session,
+    site_id: int,
+    account_id: int,
+    *,
+    subreddit: str | None = None,
+    seed: int | None = None,
+) -> str:
     profile = (
         db.query(RedditAccountProfile)
         .filter(RedditAccountProfile.site_id == site_id, RedditAccountProfile.account_id == account_id)
@@ -218,7 +236,8 @@ def _persona_prompt_for(db: Session, site_id: int, account_id: int) -> str:
     )
     if not profile:
         return ""
-    return parse_persona(profile.persona, config=profile.persona_config).to_prompt()
+    persona = parse_persona(profile.persona, config=profile.persona_config)
+    return persona.to_prompt(subreddit=subreddit, seed=seed)
 
 
 def _brief_from_product(brand: RedditBrand, product: RedditProduct) -> dict:
@@ -262,10 +281,46 @@ def _require_brand_product(
     return brand, product
 
 
-def _fill_post_out(post: RedditPost) -> RedditPost:
+def _fill_post_out(post: RedditPost, db: Session | None = None) -> RedditPost:
     if post.account:
         post.account_name = reddit_oauth.display_reddit_name(post.account.account_name)
+    post.planned_at = post.scheduled_at
+    if db is not None and post.campaign_id:
+        campaign = db.get(RedditCampaign, post.campaign_id)
+        post.campaign_name = campaign.name if campaign else None
+        if post.scheduled_at is None:
+            # 待审内容尚无定时：展示关联动作的计划时间，供待审队列提示
+            action = (
+                db.query(RedditCampaignAction)
+                .filter(
+                    RedditCampaignAction.post_id == post.id,
+                    RedditCampaignAction.action_type == "post",
+                )
+                .order_by(RedditCampaignAction.id.desc())
+                .first()
+            )
+            if action is not None:
+                post.planned_at = action.planned_at
+    else:
+        post.campaign_name = None
     return post
+
+
+def _queue_numbers(db: Session, model, site_id: int, account_ids: set[int]) -> dict[int, int]:
+    """审核队列展示用序号：每个账号内按创建时间升序从 1 编号（帖/评论各自独立）。"""
+    ids = [a for a in account_ids if a]
+    if not ids:
+        return {}
+    rn = func.row_number().over(
+        partition_by=model.account_id,
+        order_by=(model.created_at.asc(), model.id.asc()),
+    )
+    rows = (
+        db.query(model.id, rn.label("seq"))
+        .filter(model.site_id == site_id, model.account_id.in_(ids))
+        .all()
+    )
+    return {int(row[0]): int(row[1]) for row in rows}
 
 
 def _fill_comment_out(db: Session, comment: RedditComment) -> RedditComment:
@@ -281,6 +336,25 @@ def _fill_comment_out(db: Session, comment: RedditComment) -> RedditComment:
         comment.product_name = product.name if product else None
     else:
         comment.product_name = None
+    comment.planned_at = comment.scheduled_at
+    if comment.campaign_id:
+        campaign = db.get(RedditCampaign, comment.campaign_id)
+        comment.campaign_name = campaign.name if campaign else None
+        if comment.scheduled_at is None:
+            # 待审内容尚无定时：展示关联动作的计划时间，供待审队列提示
+            action = (
+                db.query(RedditCampaignAction)
+                .filter(
+                    RedditCampaignAction.comment_id == comment.id,
+                    RedditCampaignAction.action_type == "comment",
+                )
+                .order_by(RedditCampaignAction.id.desc())
+                .first()
+            )
+            if action is not None:
+                comment.planned_at = action.planned_at
+    else:
+        comment.campaign_name = None
     return comment
 
 
@@ -608,73 +682,22 @@ def generate_post(
     if allow_product and not payload.product_id:
         raise HTTPException(status_code=400, detail="开启「允许提及产品」时必须选择产品")
 
-    site_url = None
-    if allow_product and payload.include_site_url:
-        site_url = _site_url_from_domain(ctx.site.domain)
-
-    purpose = _purpose_for_subreddit(db, ctx.site.id, payload.subreddit)
-    intent = resolve_post_intent(
-        post_type=payload.post_type,
-        community_purpose=purpose,
-        include_site_url=bool(site_url),
-        allow_product=allow_product,
-    )
-
-    persona_prompt = _persona_prompt_for(db, ctx.site.id, account.id)
-    product_brief = None
-    keyword = ""
-    if allow_product and payload.product_id:
-        brand, product = _require_brand_product(
-            db, ctx.site.id, payload.brand_id, payload.product_id
-        )
-        from app.services.reddit_discover import (
-            pick_promo_search_keyword,
-            product_search_terms,
-        )
-
-        terms = product_search_terms(
-            keywords=[r.keyword for r in (product.keyword_rows or [])],
-        )
-        if not terms:
-            raise HTTPException(status_code=400, detail="该产品尚未绑定关键词，请先在品牌/产品库中填写")
-        keyword = pick_promo_search_keyword(terms)
-        product_brief = _brief_from_product(brand, product)
-    recent_titles = [
-        row[0]
-        for row in (
-            db.query(RedditPost.title)
-            .filter(
-                RedditPost.account_id == account.id,
-                RedditPost.post_type == payload.post_type,
-            )
-            .order_by(RedditPost.id.desc())
-            .limit(8)
-            .all()
-        )
-        if row[0]
-    ]
+    from app.services.reddit_content import generate_post_content
 
     try:
-        ai = get_ai_client()
-        client = get_reddit_client_for_account(account)
-        from app.services.reddit_style import fetch_community_examples
-
-        community_examples = fetch_community_examples(client, payload.subreddit)
-        generated = ai.generate_reddit_post(
-            post_type=payload.post_type,
+        generated = generate_post_content(
+            db,
+            site=ctx.site,
+            account=account,
             subreddit=payload.subreddit,
-            keyword=keyword,
-            site_url=site_url,
-            persona_prompt=persona_prompt,
-            product_brief=product_brief,
+            post_type=payload.post_type,
             allow_product=allow_product,
-            community_rules=_rules_text_for_subreddit(
-                db, ctx.site.id, payload.subreddit, account_id=account.id
-            ),
-            avoid_titles=recent_titles,
-            community_examples=community_examples,
-            site_id=ctx.site.id,
+            include_site_url=bool(payload.include_site_url),
+            brand_id=payload.brand_id,
+            product_id=payload.product_id,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except DeepSeekError as exc:
         raise HTTPException(status_code=502, detail=f"AI 服务不可用：{exc}") from exc
 
@@ -682,17 +705,28 @@ def generate_post(
         site_id=ctx.site.id,
         account_id=account.id,
         post_type=payload.post_type,
-        subreddit=normalize_subreddit(payload.subreddit),
-        keyword=keyword,
+        subreddit=generated["subreddit"],
+        keyword=generated["keyword"],
         title=generated["title"],
         body=generated["body"],
-        site_url=site_url,
+        site_url=generated["site_url"],
         status="pending_review",
-        content_intent=intent,
+        content_intent=generated["intent"],
+        ai_risk=generated.get("ai_risk"),
+        ai_score=generated.get("ai_score"),
     )
     db.add(post)
     db.commit()
     db.refresh(post)
+    from app.services.reddit_community_rotation import record_activity
+
+    record_activity(
+        db,
+        site_id=ctx.site.id,
+        account_id=account.id,
+        subreddit=post.subreddit,
+        angle=generated.get("angle"),
+    )
     return _fill_post_out(post)
 
 
@@ -709,7 +743,11 @@ def list_posts(
     if status_filter:
         q = q.filter(RedditPost.status == status_filter)
     posts = q.order_by(RedditPost.created_at.desc()).limit(100).all()
-    return [_fill_post_out(p) for p in posts]
+    seq = _queue_numbers(db, RedditPost, ctx.site.id, {p.account_id for p in posts})
+    out = [_fill_post_out(p, db) for p in posts]
+    for p in out:
+        p.queue_no = seq.get(p.id)
+    return out
 
 
 @router.patch("/posts/{post_id}", response_model=RedditPostOut)
@@ -752,10 +790,15 @@ def approve_post(
             .filter(RedditCampaignAction.post_id == post.id, RedditCampaignAction.action_type == "post")
             .first()
         )
-        if action and action.planned_at and action.planned_at > now_bj():
-            post.scheduled_at = action.planned_at
+        if action and action.planned_at:
+            planned = as_bj_naive(action.planned_at)
+            # 计划时间已过：立即发布兜底，避免 approved 且无定时内容被发布扫描遗漏
+            post.scheduled_at = planned if planned > now_bj() else now_bj()
     db.commit()
     db.refresh(post)
+    if post.campaign_id:
+        # 事件加速：立即触发一轮 campaign tick，消除最长 15 分钟的拾取延迟
+        trigger_campaign_tick()
     return _fill_post_out(post)
 
 
@@ -843,9 +886,10 @@ def schedule_post(
         raise HTTPException(status_code=404, detail="发帖任务不存在")
     if post.status != "approved":
         raise HTTPException(status_code=400, detail="请先批准后再设置定时发布")
-    if payload.scheduled_at <= now_bj():
+    scheduled = as_bj_naive(payload.scheduled_at)
+    if scheduled <= now_bj():
         raise HTTPException(status_code=400, detail="定时时间必须晚于当前时间")
-    post.scheduled_at = payload.scheduled_at
+    post.scheduled_at = scheduled
     db.commit()
     db.refresh(post)
     return _fill_post_out(post)
@@ -881,6 +925,7 @@ def _generate_comment_for_url(
     content_intent: str | None = None,
     brand_id: int | None = None,
     product_id: int | None = None,
+    angle_tag: str | None = None,
 ) -> RedditComment:
     account = reddit_oauth.get_site_account(db, ctx.site.id, account_id)
     if not account:
@@ -914,7 +959,9 @@ def _generate_comment_for_url(
     if intent == "casual":
         site_url = None
         include_site_url = False
-    persona_prompt = _persona_prompt_for(db, ctx.site.id, account.id)
+    persona_prompt = _persona_prompt_for(
+        db, ctx.site.id, account.id, subreddit=subreddit, seed=account.id + len(title)
+    )
     product_brief = None
     resolved_brand_id = None
     resolved_product_id = None
@@ -923,6 +970,16 @@ def _generate_comment_for_url(
         product_brief = _brief_from_product(brand, product)
         resolved_brand_id = brand.id
         resolved_product_id = product.id
+    from app.services.reddit_community_rotation import (
+        angle_hint as _angle_hint,
+        pick_angle,
+        recent_angles,
+        record_activity,
+    )
+
+    if angle_tag is None:
+        angle_tag = pick_angle(recent_angles(db, account.id, subreddit))
+    angle_hint = _angle_hint(angle_tag)
     try:
         ai = get_ai_client()
         client = get_reddit_client_for_account(account)
@@ -944,9 +1001,11 @@ def _generate_comment_for_url(
             seed=account.id + len(title),
             community_examples=community_examples,
             site_id=ctx.site.id,
+            angle_hint=angle_hint,
         )
         comment_body = generated.body
         ai_risk = generated.ai_risk
+        ai_score = generated.ai_score_after_humanize
     except DeepSeekError as exc:
         raise HTTPException(status_code=502, detail=f"AI 服务不可用：{exc}") from exc
 
@@ -962,6 +1021,7 @@ def _generate_comment_for_url(
         discover_source=discover_source,
         content_intent=intent,
         ai_risk=ai_risk,
+        ai_score=ai_score,
         brand_id=resolved_brand_id,
         product_id=resolved_product_id,
         status="pending_review",
@@ -969,6 +1029,13 @@ def _generate_comment_for_url(
     db.add(comment)
     db.commit()
     db.refresh(comment)
+    record_activity(
+        db,
+        site_id=ctx.site.id,
+        account_id=account.id,
+        subreddit=comment.subreddit,
+        angle=angle_tag,
+    )
     return _fill_comment_out(db, comment)
 
 
@@ -1032,7 +1099,11 @@ def list_comments(
     if status_filter:
         q = q.filter(RedditComment.status == status_filter)
     comments = q.order_by(RedditComment.created_at.desc()).limit(100).all()
-    return [_fill_comment_out(db, c) for c in comments]
+    seq = _queue_numbers(db, RedditComment, ctx.site.id, {c.account_id for c in comments})
+    out = [_fill_comment_out(db, c) for c in comments]
+    for c in out:
+        c.queue_no = seq.get(c.id)
+    return out
 
 
 @router.patch("/comments/{comment_id}", response_model=RedditCommentOut)
@@ -1081,10 +1152,15 @@ def approve_comment(
             .filter(RedditCampaignAction.comment_id == comment.id, RedditCampaignAction.action_type == "comment")
             .first()
         )
-        if action and action.planned_at and action.planned_at > now_bj():
-            comment.scheduled_at = action.planned_at
+        if action and action.planned_at:
+            planned = as_bj_naive(action.planned_at)
+            # 计划时间已过：立即发布兜底，避免 approved 且无定时内容被发布扫描遗漏
+            comment.scheduled_at = planned if planned > now_bj() else now_bj()
     db.commit()
     db.refresh(comment)
+    if comment.campaign_id:
+        # 事件加速：立即触发一轮 campaign tick，消除最长 15 分钟的拾取延迟
+        trigger_campaign_tick()
     return _fill_comment_out(db, comment)
 
 
@@ -1190,9 +1266,10 @@ def schedule_comment(
         raise HTTPException(status_code=404, detail="评论任务不存在")
     if comment.status != "approved":
         raise HTTPException(status_code=400, detail="请先批准后再设置定时发布")
-    if payload.scheduled_at <= now_bj():
+    scheduled = as_bj_naive(payload.scheduled_at)
+    if scheduled <= now_bj():
         raise HTTPException(status_code=400, detail="定时时间必须晚于当前时间")
-    comment.scheduled_at = payload.scheduled_at
+    comment.scheduled_at = scheduled
     db.commit()
     db.refresh(comment)
     return _fill_comment_out(db, comment)
@@ -2292,6 +2369,8 @@ def start_automation_campaign(
     campaign.status = "running"
     db.commit()
     db.refresh(campaign)
+    # 事件加速：启动即触发一轮 tick，立即完成首批动作排期
+    trigger_campaign_tick()
     return _campaign_out(db, campaign)
 
 
@@ -2361,10 +2440,41 @@ def retry_campaign_action(
         raise HTTPException(status_code=404, detail="动作记录不存在")
     if action.status != "failed":
         raise HTTPException(status_code=400, detail="仅失败的动作可重试")
+
+    now = now_bj()
     action.status = "pending"
     action.error_message = None
-    db.commit()
-    db.refresh(action)
+
+    if action.action_type in ("upvote_related", "upvote_self"):
+        # 点赞：回队列由下一轮 tick（或立即触发的 tick）执行
+        action.planned_at = now
+        db.commit()
+        db.refresh(action)
+        trigger_campaign_tick()
+    else:
+        # 发帖/评论：同步重置关联内容并立即入队发布，避免 reconcile 又把动作标回失败
+        content = None
+        kind = None
+        if action.post_id:
+            content = db.get(RedditPost, action.post_id)
+            kind = "post"
+        elif action.comment_id:
+            content = db.get(RedditComment, action.comment_id)
+            kind = "comment"
+        if content is None:
+            raise HTTPException(status_code=400, detail="关联内容已删除，无法重试")
+        content.status = "approved"
+        content.scheduled_at = now
+        content.error_message = None
+        db.commit()
+        db.refresh(action)
+        try:
+            task = publish_reddit_post_by_id if kind == "post" else publish_reddit_comment_by_id
+            try_enqueue_publish(kind, content.id, task)
+        except Exception:
+            logger.warning("Retry enqueue publish failed for campaign action #%s", action_id, exc_info=True)
+            # 入队失败不阻断：发布扫描任务会在 ≤15 分钟内拾取 approved + 到期的内容
+
     item = RedditCampaignActionOut.model_validate(action)
     account = db.get(SocialAccount, action.account_id)
     item.account_name = account.account_name if account else None

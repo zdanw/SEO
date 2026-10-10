@@ -21,3 +21,14 @@ def now_bj() -> datetime:
 def from_epoch_bj(ts: float) -> datetime:
     """Unix epoch → 北京时间墙钟（naive）。"""
     return datetime.fromtimestamp(ts, _BJ).replace(tzinfo=None)
+
+
+def as_bj_naive(dt: datetime) -> datetime:
+    """任意 datetime → 北京时间墙钟（naive），统一可与 now_bj() 比较。
+
+    - aware（如 Postgres timestamptz 读回 +08）：换算到北京墙钟后剥掉 tzinfo
+    - naive：视为北京墙钟原样返回（与写入语义一致）
+    """
+    if dt.tzinfo is not None:
+        return dt.astimezone(_BJ).replace(tzinfo=None)
+    return dt

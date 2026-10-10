@@ -26,7 +26,7 @@ _QUEUE_ALERT_THRESHOLD = 100
 def get_queue_health(
     ctx: SiteContext = Depends(get_site_context),
 ):
-    """查看 Celery 队列积压（serp / social / default）。读 Celery broker Redis DB。"""
+    """查看 Celery 队列积压（serp / social / default）与 Campaign 调度心跳。读 Celery broker Redis DB。"""
     _ = ctx
     queues = {}
     alerts = []
@@ -35,10 +35,21 @@ def get_queue_health(
         queues[name] = {"depth": depth, "alert": depth is not None and depth >= _QUEUE_ALERT_THRESHOLD}
         if depth is not None and depth >= _QUEUE_ALERT_THRESHOLD:
             alerts.append(f"队列 {name} 积压 {depth}（阈值 {_QUEUE_ALERT_THRESHOLD}）")
+    # Campaign 调度心跳：beat 整体宕机时本接口仍可被外部拨测
+    from app.services.reddit_campaign import read_campaign_tick_heartbeat
+
+    tick_heartbeat = read_campaign_tick_heartbeat()
+    if tick_heartbeat["stale"]:
+        reason = tick_heartbeat["reason"]
+        label = {"missing": "无心跳（从未运行或已停摆）", "corrupted": "心跳数据异常"}.get(
+            reason, f"心跳过期 {tick_heartbeat['age_minutes']} 分钟"
+        )
+        alerts.append(f"Campaign 调度停摆：{label}，请检查 beat 与 social worker")
     return {
         "queues": queues,
         "alert_threshold": _QUEUE_ALERT_THRESHOLD,
         "alerts": alerts,
+        "campaign_tick_heartbeat": tick_heartbeat,
         "checked_at": now_bj().isoformat(),
     }
 

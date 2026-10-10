@@ -85,6 +85,7 @@ CRITICAL coherence (must all be true):
 - Belong in r/{subreddit}: match what that community actually posts. If it is meme/humor/shitpost oriented, keep it punchy and on-theme for that sub — do NOT write a dry techsupport / parenting / shopping essay that belongs elsewhere.
 {keyword_line}
 {examples_line}
+{revision_block}
 """
 
 REDDIT_VENT_PROMPT = """Write a Reddit late-night vent / emotional support post for r/{subreddit}.
@@ -599,7 +600,9 @@ class DeepSeekClient:
         community_rules: str | None = None,
         avoid_titles: list[str] | None = None,
         community_examples: list[dict[str, str]] | None = None,
+        revision_notes: str | None = None,
         site_id: int | None = None,
+        angle_hint: str = "",
         rng: random.Random | None = None,
     ) -> dict[str, str]:
         """Generate Reddit post; post_type=auto invents format for the sub."""
@@ -624,7 +627,7 @@ class DeepSeekClient:
         examples_raw = format_community_examples_block(community_examples, for_post=True)
         examples_line = f"{examples_raw}\n" if examples_raw else ""
         brief = product_brief if allow_product else None
-        extra = _reddit_post_extra_lines(persona_prompt, brief)
+        extra = _reddit_post_extra_lines(persona_prompt, brief, angle_hint=angle_hint)
         picker = rng or random.Random()
         rules_line = format_rules_prompt_line(community_rules)
         site_line = _site_line_for_post(allow_product=allow_product, site_url=site_url) + extra
@@ -657,6 +660,7 @@ class DeepSeekClient:
                 keyword_line=keyword_line,
                 product_rule=product_rule,
                 examples_line=examples_line,
+                revision_block=format_revision_block(revision_notes),
             )
             temp = 0.92 + picker.random() * 0.08
             raw = self.chat(
@@ -713,6 +717,7 @@ class DeepSeekClient:
         revision_notes: str | None = None,
         community_examples: list[dict[str, str]] | None = None,
         site_id: int | None = None,
+        angle_hint: str = "",
     ) -> str:
         """Generate a contextual Reddit comment (English)."""
         from app.services.reddit_community_verify import format_rules_prompt_line
@@ -749,6 +754,8 @@ class DeepSeekClient:
             )
             site_line = "Do not include links."
         rules_line = format_rules_prompt_line(community_rules)
+        if angle_hint:
+            intent_line = f"{intent_line} Narrative angle for this reply: {angle_hint}"
         revision_block = format_revision_block(revision_notes)
         examples_raw = format_community_examples_block(community_examples, for_post=False)
         examples_block = f"{examples_raw}\n" if examples_raw else ""
@@ -774,10 +781,14 @@ class DeepSeekClient:
 
 
 # ============ 工具函数 ============
-def _reddit_post_extra_lines(persona_prompt: str, product_brief: dict | None) -> str:
+def _reddit_post_extra_lines(
+    persona_prompt: str, product_brief: dict | None, angle_hint: str = ""
+) -> str:
     chunks: list[str] = []
     if persona_prompt:
         chunks.append(f"Author persona: {persona_prompt}")
+    if angle_hint:
+        chunks.append(f"Narrative angle to use for this draft: {angle_hint}")
     if product_brief:
         brand = str(product_brief.get("brand") or "").strip()
         category = str(product_brief.get("category") or "").strip()

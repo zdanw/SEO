@@ -61,7 +61,7 @@ def test_pipeline_passes_revision_notes_on_rewrite(monkeypatch):
         ]
     )
 
-    def fake_detect(_text: str) -> AiDetectionResult:
+    def fake_detect(_text: str, **kwargs) -> AiDetectionResult:
         return next(scores)
 
     monkeypatch.setattr("app.services.reddit_content.detect_ai_content", fake_detect)
@@ -95,7 +95,7 @@ def test_pipeline_preserves_mixed_risk(monkeypatch):
     ai = _FakeAI()
     ai._bodies = ["kinda mixed tone but mostly fine honestly."]
 
-    def fake_detect(_text: str) -> AiDetectionResult:
+    def fake_detect(_text: str, **kwargs) -> AiDetectionResult:
         return AiDetectionResult(score=Decimal("45"), verdict="mixed", engine="t")
 
     monkeypatch.setattr("app.services.reddit_content.detect_ai_content", fake_detect)
@@ -125,7 +125,7 @@ def test_brand_gate_humanizes_and_sets_brand_leak(monkeypatch):
     ]
     humanized: list[str] = []
 
-    def fake_detect(_text: str) -> AiDetectionResult:
+    def fake_detect(_text: str, **kwargs) -> AiDetectionResult:
         return AiDetectionResult(score=Decimal("40"), verdict="mixed", engine="t")
 
     def fake_humanize(text, **kw):
@@ -176,3 +176,99 @@ def test_generate_comment_prompt_includes_revision(monkeypatch):
     )
     assert "Revision guidance" in captured["user"]
     assert "Avoid em dash overuse" in captured["user"]
+
+
+def test_generate_post_prompt_includes_revision(monkeypatch):
+    from app.services.ai_writer import DeepSeekClient
+
+    client = DeepSeekClient(api_key="sk-test", base_url="https://example.invalid/v1", model="x")
+    captured = {}
+
+    def fake_chat(user_prompt, system_prompt="", temperature=0.7, max_tokens=4096):
+        captured["user"] = user_prompt
+        return '{"title": "a sleep story", "body": "sleep stuff happened."}'
+
+    monkeypatch.setattr(client, "chat", fake_chat)
+    client.generate_reddit_post(
+        post_type="auto",
+        subreddit="Parenting",
+        keyword="sleep",
+        revision_notes="Avoid em dash overuse.",
+    )
+    assert "Revision guidance" in captured["user"]
+    assert "Avoid em dash overuse" in captured["user"]
+
+
+class _FakePostAI:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self._posts = [
+            {"title": "Polished title", "body": "A very polished draft about sleep."},
+            {"title": "messy title", "body": "tbh nights been rough, same boat here."},
+        ]
+
+    def generate_reddit_post(self, **kwargs):
+        self.calls.append(kwargs)
+        idx = min(len(self.calls) - 1, len(self._posts) - 1)
+        return self._posts[idx]
+
+
+def test_post_pipeline_rewrites_on_likely_ai(monkeypatch):
+    from app.services.reddit_content import generate_post_pipeline
+
+    ai = _FakePostAI()
+    scores = iter(
+        [
+            AiDetectionResult(score=Decimal("80"), verdict="likely_ai", engine="t"),
+            AiDetectionResult(score=Decimal("78"), verdict="likely_ai", engine="t"),
+            AiDetectionResult(score=Decimal("20"), verdict="human_like", engine="t"),
+            AiDetectionResult(score=Decimal("18"), verdict="human_like", engine="t"),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "app.services.reddit_content.detect_ai_content", lambda *a, **k: next(scores)
+    )
+    monkeypatch.setattr("app.services.reddit_content.humanize_post", lambda text, **k: text)
+    monkeypatch.setattr("app.services.reddit_content.record_detection_patterns", lambda *a, **k: None)
+
+    out = generate_post_pipeline(
+        ai,  # type: ignore[arg-type]
+        post_type="auto",
+        subreddit="Parenting",
+        keyword="sleep",
+        seed=1,
+        site_id=1,
+    )
+    assert len(ai.calls) == 2
+    assert ai.calls[0].get("revision_notes") in (None, "")
+    assert ai.calls[1].get("revision_notes")
+    assert out.ai_risk == "ok"
+    assert out.rewrite_count == 1
+    assert out.ai_score_before_humanize is not None
+    assert out.ai_score_after_humanize is not None
+
+
+def test_post_pipeline_marks_likely_ai_after_exhaustion(monkeypatch):
+    from app.services.reddit_content import generate_post_pipeline
+
+    ai = _FakePostAI()
+    monkeypatch.setattr(
+        "app.services.reddit_content.detect_ai_content",
+        lambda *a, **k: AiDetectionResult(score=Decimal("85"), verdict="likely_ai", engine="t"),
+    )
+    monkeypatch.setattr("app.services.reddit_content.humanize_post", lambda text, **k: text)
+    monkeypatch.setattr("app.services.reddit_content.record_detection_patterns", lambda *a, **k: None)
+
+    out = generate_post_pipeline(
+        ai,  # type: ignore[arg-type]
+        post_type="auto",
+        subreddit="Parenting",
+        keyword="sleep",
+        seed=1,
+        site_id=1,
+    )
+    assert len(ai.calls) == 2
+    assert out.ai_risk == "likely_ai"
+    assert out.rewrite_count == 1
+
