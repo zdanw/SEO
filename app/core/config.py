@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-in-production-please-123456"
     API_V1_PREFIX: str = "/api/v1"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24h
-    ALLOW_REGISTRATION: bool = False
+    ALLOW_REGISTRATION: bool = True
     CORS_ORIGINS: str = ""
 
     # 数据库
