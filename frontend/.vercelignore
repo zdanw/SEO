@@ -1,0 +1,9 @@
+node_modules
+dist
+dist-ssr
+.pytest_cache
+.vite
+*.log
+.env
+.env.*
+!.env.example
