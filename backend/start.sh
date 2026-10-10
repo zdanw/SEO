@@ -4,7 +4,7 @@
 # ---------------------------------------------------------------------------
 # 依次完成：
 #   1) 生成/复用 SECRET_KEY，装配环境变量
-#   2) 拉起 PostgreSQL 15（含 TimescaleDB 预加载）、建库建角色
+#   2) 若无外部 DATABASE_URL，则拉起 PostgreSQL 15（含 TimescaleDB 预加载）、建库建角色
 #   3) 拉起 Redis
 #   4) 执行 alembic 迁移
 #   5) 拉起 Celery worker + beat
@@ -39,12 +39,24 @@ export SECRET_KEY
 export APP_ENV="${APP_ENV:-production}"
 export APP_DEBUG="${APP_DEBUG:-false}"
 
-export DB_HOST="127.0.0.1"
-export DB_PORT="5432"
-export DB_USER="${DB_USER:-seo}"
-export DB_PASSWORD="${DB_PASSWORD:-SeoMsLocal_2026_a1b2}"
-export DB_NAME="${DB_NAME:-seo_platform}"
-export DATABASE_URL="postgresql+psycopg2://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+# 若创空间「环境变量」已提供外部 DATABASE_URL（非本机地址），则直接使用它并跳过本地
+# PostgreSQL，避免下面的默认值把外部连接串覆盖掉。
+IS_EXTERNAL_DB=0
+case "${DATABASE_URL:-}" in
+  ""|*127.0.0.1*|*localhost*) ;;
+  *) IS_EXTERNAL_DB=1 ;;
+esac
+
+if [ "${IS_EXTERNAL_DB}" = "1" ]; then
+  log "检测到外部 DATABASE_URL，跳过本地 PostgreSQL"
+else
+  export DB_HOST="127.0.0.1"
+  export DB_PORT="5432"
+  export DB_USER="${DB_USER:-seo}"
+  export DB_PASSWORD="${DB_PASSWORD:-SeoMsLocal_2026_a1b2}"
+  export DB_NAME="${DB_NAME:-seo_platform}"
+  export DATABASE_URL="postgresql+psycopg2://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+fi
 
 export REDIS_HOST="127.0.0.1"
 export REDIS_PORT="6379"
@@ -57,30 +69,32 @@ export CELERY_RESULT_BACKEND="redis://:${REDIS_PASSWORD}@${REDIS_HOST}:${REDIS_P
 export CORS_ORIGINS="${CORS_ORIGINS:-https://www.modelscope.cn}"
 export FRONTEND_URL="${FRONTEND_URL:-https://www.modelscope.cn}"
 
-# ---------- 2. PostgreSQL ----------
-log "启动 PostgreSQL ${PG_VERSION}/${PG_CLUSTER} ..."
-if [ ! -d "/etc/postgresql/${PG_VERSION}/${PG_CLUSTER}" ]; then
-  pg_createcluster "${PG_VERSION}" "${PG_CLUSTER}" >/dev/null
-fi
-if ! grep -q "timescaledb" "${PG_CONF}"; then
-  echo "shared_preload_libraries = 'timescaledb'" >> "${PG_CONF}"
-fi
-pg_ctlcluster "${PG_VERSION}" "${PG_CLUSTER}" start || true
+# ---------- 2. PostgreSQL（外部数据库时跳过）----------
+if [ "${IS_EXTERNAL_DB}" = "0" ]; then
+  log "启动 PostgreSQL ${PG_VERSION}/${PG_CLUSTER} ..."
+  if [ ! -d "/etc/postgresql/${PG_VERSION}/${PG_CLUSTER}" ]; then
+    pg_createcluster "${PG_VERSION}" "${PG_CLUSTER}" >/dev/null
+  fi
+  if ! grep -q "timescaledb" "${PG_CONF}"; then
+    echo "shared_preload_libraries = 'timescaledb'" >> "${PG_CONF}"
+  fi
+  pg_ctlcluster "${PG_VERSION}" "${PG_CLUSTER}" start || true
 
-for _ in $(seq 1 30); do
-  if su postgres -c "pg_isready -q"; then break; fi
-  sleep 1
-done
-su postgres -c "pg_isready -q" || { log "PostgreSQL 启动失败"; exit 1; }
+  for _ in $(seq 1 30); do
+    if su postgres -c "pg_isready -q"; then break; fi
+    sleep 1
+  done
+  su postgres -c "pg_isready -q" || { log "PostgreSQL 启动失败"; exit 1; }
 
-# 建角色（超级用户，TimescaleDB 建扩展/hypertable 需要）与数据库，幂等
-if ! su postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\"" | grep -q 1; then
-  log "创建数据库角色 ${DB_USER} ..."
-  su postgres -c "psql -c \"CREATE ROLE ${DB_USER} LOGIN SUPERUSER PASSWORD '${DB_PASSWORD}'\""
-fi
-if ! su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\"" | grep -q 1; then
-  log "创建数据库 ${DB_NAME} ..."
-  su postgres -c "createdb -O ${DB_USER} ${DB_NAME}"
+  # 建角色（超级用户，TimescaleDB 建扩展/hypertable 需要）与数据库，幂等
+  if ! su postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'\"" | grep -q 1; then
+    log "创建数据库角色 ${DB_USER} ..."
+    su postgres -c "psql -c \"CREATE ROLE ${DB_USER} LOGIN SUPERUSER PASSWORD '${DB_PASSWORD}'\""
+  fi
+  if ! su postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'\"" | grep -q 1; then
+    log "创建数据库 ${DB_NAME} ..."
+    su postgres -c "createdb -O ${DB_USER} ${DB_NAME}"
+  fi
 fi
 
 # ---------- 3. Redis ----------
