@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
-from app.core.timeutil import now_bj
+from app.core.timeutil import as_bj_naive, now_bj
 
 from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import or_
@@ -56,6 +56,32 @@ def try_enqueue_publish(kind: str, item_id: int, task) -> bool:
         task.apply_async(
             args=[item_id],
             task_id=f"reddit-publish-{kind}-{item_id}",
+        )
+        return True
+    except Exception:
+        r.delete(key)
+        raise
+
+
+def schedule_publish(db: Session, kind: str, item_id: int, task, run_at) -> bool:
+    """ETA 直投：到点投递发布任务（campaign 排期用），beat 15 分钟扫描仍作兜底。
+
+    - 投递前先跑 AI 复检闸门（与发布扫描同一语义），拦截审批后被编辑引入 AI 味的内容
+    - 锁 TTL = countdown + 15 分钟：覆盖整个等待期，避免 beat 扫描在等待期内重复入队
+    - worker 重启丢失 ETA 任务时，锁在 planned_at + 15 分钟过期后由 beat 兜底拾取
+    """
+    if _ai_recheck_blocks(db, kind=kind, item_id=item_id):
+        return False
+    delay = max(0.0, (as_bj_naive(run_at) - now_bj()).total_seconds())
+    r = get_redis()
+    key = f"enqueue:reddit:publish:{kind}:{item_id}"
+    if not r.set(key, "1", nx=True, ex=int(delay) + _ENQUEUE_TTL_SEC):
+        return False
+    try:
+        task.apply_async(
+            args=[item_id],
+            task_id=f"reddit-publish-{kind}-{item_id}",
+            countdown=int(delay) or None,
         )
         return True
     except Exception:
@@ -330,53 +356,81 @@ def publish_scheduled_reddit_content() -> dict:
 
 @celery_app.task(name="app.tasks.reddit_tasks.sync_reddit_post_metrics")
 def sync_reddit_post_metrics(days: int = 30) -> dict:
-    """同步近 N 天已发布帖子的互动数据（score / 评论数），沉淀爆款模板与 KPI 依据。"""
+    """同步近 N 天已发布帖子的互动数据（score / 评论数），沉淀爆款模板与 KPI 依据。
+
+    按帖子 ID 精确直查（替代旧的标题搜索模糊匹配）；取不到的帖子计入 missing
+    并告警日志，不再静默丢弃。
+    """
     db: Session = SessionLocal()
     synced = 0
+    missing = 0
+    errors = 0
     try:
         cutoff = now_bj() - timedelta(days=days)
         posts = (
             db.query(RedditPost)
             .filter(
                 RedditPost.status == "posted",
+                RedditPost.reddit_post_id.isnot(None),
                 RedditPost.published_at.isnot(None),
                 RedditPost.published_at >= cutoff,
             )
+            .order_by(RedditPost.published_at.desc())
             .limit(200)
             .all()
         )
-        for post in posts:
-            if not post.reddit_post_id:
-                continue
-            try:
-                from app.services.reddit_client import get_reddit_client_for_account
+        from app.services.reddit_client import get_reddit_client_for_account
 
+        for post in posts:
+            try:
                 client = get_reddit_client_for_account(post.account)
-                items = client.search_posts(post.subreddit, post.title[:80], limit=10)
-                match = None
-                short_id = post.reddit_post_id.removeprefix("t3_")
-                for item in items:
-                    tid = str(item.get("thing_id") or "")
-                    if tid == post.reddit_post_id or tid.endswith(short_id):
-                        match = item
-                        break
-                if not match:
-                    continue
-                db.add(
-                    RedditPostMetric(
-                        post_id=post.id,
-                        score=int(match.get("score", 0)),
-                        num_comments=int(match.get("num_comments", 0)),
-                        synced_at=now_bj(),
-                    )
-                )
-                synced += 1
+                item = client.get_post_by_id(post.reddit_post_id, post.subreddit)
             except Exception as exc:
                 logger.warning("Metric sync failed for post #%s: %s", post.id, exc)
                 db.rollback()
+                errors += 1
+                continue
+            if not item:
+                missing += 1
+                logger.warning(
+                    "Metric sync: post #%s (%s) not found upstream, skipped",
+                    post.id,
+                    post.reddit_post_id,
+                )
+                continue
+            score = int(item.get("score") or 0)
+            # 风险信号：投票效果验证——分数较上次快照明显回落（净踩）记告警
+            prev = (
+                db.query(RedditPostMetric.score)
+                .filter(RedditPostMetric.post_id == post.id)
+                .order_by(RedditPostMetric.synced_at.desc())
+                .first()
+            )
+            if prev is not None and score <= int(prev[0] or 0) - 3:
+                logger.warning(
+                    "Metric sync: post #%s score dropped %s→%s since last sync "
+                    "(possible downvotes / removal, check vote effect)",
+                    post.id,
+                    prev[0],
+                    score,
+                )
+            db.add(
+                RedditPostMetric(
+                    post_id=post.id,
+                    score=score,
+                    num_comments=int(item.get("num_comments") or 0),
+                    synced_at=now_bj(),
+                )
+            )
+            synced += 1
         db.commit()
-        logger.info("Reddit post metrics synced: %d posts", synced)
-        return {"synced": synced}
+        logger.info(
+            "Reddit post metrics synced: %d posts (missing=%d errors=%d)",
+            synced,
+            missing,
+            errors,
+        )
+        return {"synced": synced, "missing": missing, "errors": errors}
     finally:
         db.close()
 
@@ -414,7 +468,7 @@ def reddit_account_health_check(min_posts: int = 3) -> dict:
                 metrics = (
                     db.query(RedditPostMetric)
                     .filter(RedditPostMetric.post_id.in_([p.id for p in recent_posts]))
-                    .order_by(RedditPostMetric.synced_at.asc())
+                    .order_by(RedditPostMetric.synced_at.asc(), RedditPostMetric.id.asc())
                     .all()
                 )
                 for m in metrics:

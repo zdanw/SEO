@@ -142,6 +142,15 @@ class RedditApiClient:
             normalize_subreddit(subreddit) if subreddit else "",
         )
 
+    def get_post_by_id(self, thing_id: str, subreddit: str = "") -> dict[str, Any] | None:
+        """按帖子 ID 精确取帖（含 score/num_comments）；取不到返回 None。"""
+        return self._call(
+            self._zernio.get_post_by_id,
+            self._require_zernio_id(),
+            thing_id,
+            normalize_subreddit(subreddit) if subreddit else "",
+        )
+
     def search_posts(self, subreddit: str, keyword: str, limit: int = 10) -> list[dict[str, Any]]:
         sr = normalize_subreddit(subreddit)
         return self._call(self._zernio.search_posts, self._require_zernio_id(), sr, keyword, limit)

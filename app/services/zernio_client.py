@@ -337,6 +337,49 @@ class ZernioClient:
                 return found
         return {"title": "", "body": "", "subreddit": subreddit}
 
+    def get_post_by_id(
+        self,
+        zernio_account_id: str,
+        thing_id: str,
+        subreddit: str = "",
+    ) -> dict[str, Any] | None:
+        """按 Reddit 帖子 ID 精确取帖（指标回读用）；取不到返回 None。
+
+        与 get_post_context 同一上游约束（无按 ID 直取端点）：按 post_id / url:post_id
+        搜索后精确匹配 thing_id，杜绝标题模糊匹配的误配与漏配。
+        """
+        post_id = (thing_id or "").strip().removeprefix("t3_")
+        if not post_id:
+            return None
+        if self._mock_mode:
+            return {
+                "title": "Mock post",
+                "url": f"https://www.reddit.com/r/{subreddit}/comments/{post_id}/",
+                "thing_id": f"t3_{post_id}",
+                "subreddit": subreddit,
+                "score": 5,
+                "num_comments": 2,
+                "created_utc": int(time.time()),
+                "body": "",
+            }
+        sr = (subreddit or "").strip().removeprefix("r/").removeprefix("/")
+
+        def _exact(items: list[dict[str, Any]]) -> dict[str, Any] | None:
+            for item in items:
+                tid = str(item.get("thing_id") or "")
+                if tid == f"t3_{post_id}" or tid.endswith(post_id):
+                    return item
+            return None
+
+        for query in (post_id, f"url:{post_id}"):
+            try:
+                found = _exact(self.search_posts(zernio_account_id, sr, query, limit=10))
+            except ZernioError:
+                found = None
+            if found:
+                return found
+        return None
+
     def list_feed(
         self,
         zernio_account_id: str,

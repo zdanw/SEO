@@ -183,7 +183,7 @@ def get_rank_trends(
         text(
             """
             SELECT keyword_id,
-                   time_bucket('1 day', time) AS bucket,
+                   to_timestamp(floor(extract(epoch from time) / 86400) * 86400) AS bucket,
                    avg(rank) AS avg_rank
             FROM serp_rank_snapshots
             WHERE keyword_id = ANY(:ids) AND time >= :start AND crawl_status = 'success'
