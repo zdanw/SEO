@@ -214,6 +214,7 @@ class RedditCommunity(Base):
         DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
 
+
     products: Mapped[list["RedditProduct"]] = relationship(
         "RedditProduct",
         secondary=reddit_product_communities,
