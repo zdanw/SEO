@@ -113,3 +113,63 @@ def test_consistency_warnings_clean_config():
 def test_is_empty():
     assert parse_persona("").is_empty()
     assert not parse_persona(None, config=_rich_config()).is_empty()
+
+
+# ============ LLM 生成人设 ============
+class _FakeAI:
+    def __init__(self, content: str):
+        self._content = content
+
+    def chat(self, *args, **kwargs):
+        return self._content
+
+
+def test_generate_persona_config_parses_llm_json():
+    from app.services.reddit_persona import generate_persona_config
+
+    raw = (
+        "```json\n"
+        '{"voice": "32yo night-shift nurse", "interests": ["parenting", "coffee"], '
+        '"quirks": "always tired", "never_say": "sales pitch", '
+        '"background": "Works nights at a small hospital.", '
+        '"life_facts": ["drives a 12-year-old hatchback"], '
+        '"signature_opinions": ["most parenting advice is overpriced"], '
+        '"recurring_themes": ["budgeting"], '
+        '"subreddit_overrides": {"r/Coffee": {"voice": "obsessive home barista"}}, '
+        '"suggested_daily_post_limit": 2, "suggested_daily_comment_limit": 8}'
+        "\n```"
+    )
+    data = generate_persona_config("母婴育儿，新手妈妈人设", role="seeding", ai=_FakeAI(raw))
+    assert data["voice"] == "32yo night-shift nurse"
+    assert data["interests"] == ["parenting", "coffee"]
+    assert data["subreddit_overrides"] == {"coffee": {"voice": "obsessive home barista"}}
+    assert data["suggested_daily_post_limit"] == 2
+    assert data["suggested_daily_comment_limit"] == 8
+
+
+def test_generate_persona_config_normalizes_bad_values():
+    from app.services.reddit_persona import normalize_generated_persona
+
+    data = normalize_generated_persona(
+        {
+            "voice": "x",
+            "interests": "a,b",  # 字符串也会被拆成列表
+            "suggested_daily_post_limit": "99",  # 越界截断
+            "suggested_daily_comment_limit": "not-a-number",
+            "subreddit_overrides": {"not-a-dict": "skip", "coffee": {"voice": "barista"}},
+        }
+    )
+    assert data["interests"] == ["a", "b"]
+    assert data["suggested_daily_post_limit"] == 20
+    assert data["suggested_daily_comment_limit"] == 10
+    assert data["subreddit_overrides"] == {"coffee": {"voice": "barista"}}
+
+
+def test_generate_persona_config_rejects_empty():
+    from app.services.reddit_persona import generate_persona_config
+    import pytest
+
+    with pytest.raises(ValueError):
+        generate_persona_config("需求", role="seeding", ai=_FakeAI("not json at all"))
+    with pytest.raises(ValueError):
+        generate_persona_config("需求", role="seeding", ai=_FakeAI('{"voice": ""}'))

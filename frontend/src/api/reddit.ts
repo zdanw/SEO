@@ -235,6 +235,21 @@ export function updateAccountProfile(
   return http.patch<any, RedditAccount>(`/reddit/accounts/${accountId}/profile`, payload)
 }
 
+export interface PersonaGenerateResult extends PersonaConfig {
+  suggested_daily_post_limit?: number
+  suggested_daily_comment_limit?: number
+}
+
+export function generateAccountPersona(
+  accountId: number,
+  payload: { requirements: string; role?: AccountRole | null },
+) {
+  return http.post<any, PersonaGenerateResult>(
+    `/reddit/accounts/${accountId}/persona/generate`,
+    payload,
+  )
+}
+
 // ============ 社区库 ============
 export function listCommunities(accountId?: number) {
   return http.get<any, RedditCommunity[]>('/reddit/communities', {

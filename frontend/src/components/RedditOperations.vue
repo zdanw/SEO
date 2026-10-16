@@ -770,6 +770,18 @@
     <!-- 账号配置弹窗 -->
     <el-dialog v-model="profileDialog" title="账号矩阵配置" width="520px">
       <el-form label-position="top">
+        <el-form-item label="AI 生成人设（描述需求后自动填充下方各字段）">
+          <div style="display: flex; gap: 8px; width: 100%">
+            <el-input
+              v-model="personaGenRequirements"
+              placeholder="如：母婴育儿产品，人设是 30 岁新手妈妈，白天带娃晚上兼职，口吻疲惫但幽默"
+              @keyup.enter="generatePersona"
+            />
+            <el-button type="primary" plain :loading="personaGenerating" @click="generatePersona">
+              AI 生成
+            </el-button>
+          </div>
+        </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="profileForm.role" style="width: 100%">
             <el-option label="基础养号号（纯互动，不发帖）" value="warmup" />
@@ -932,7 +944,7 @@ import {
   generateRedditComment, generateRedditCommentBatch, listRedditComments,
   updateRedditComment, approveRedditComment, publishRedditComment, forceFailRedditComment, deleteRedditComment,
   searchRedditPosts,
-  getRedditOverview, listAccountProfiles, updateAccountProfile,
+  getRedditOverview, listAccountProfiles, updateAccountProfile, generateAccountPersona,
   listCommunities, createCommunity, updateCommunity, deleteCommunity, refreshCommunityRules,
   scheduleRedditPost, cancelRedditPostSchedule, syncPostMetrics,
   rejectRedditPost, rejectRedditComment, scheduleRedditComment, cancelRedditCommentSchedule,
@@ -1103,6 +1115,59 @@ const profileForm = reactive({
   background: '', lifeFactsText: '', opinionsText: '', themesText: '', overridesText: '',
   daily_post_limit: 0, daily_comment_limit: 10,
 })
+
+const personaGenRequirements = ref('')
+const personaGenerating = ref(false)
+
+async function generatePersona() {
+  const req = personaGenRequirements.value.trim()
+  if (!req) {
+    ElMessage.warning('请先描述人设需求')
+    return
+  }
+  const hasContent = Boolean(
+    profileForm.voice.trim() || profileForm.interestsText.trim() || profileForm.quirks.trim()
+    || profileForm.never_say.trim() || profileForm.background.trim()
+    || profileForm.lifeFactsText.trim() || profileForm.opinionsText.trim()
+    || profileForm.themesText.trim(),
+  )
+  if (hasContent) {
+    try {
+      await ElMessageBox.confirm('将覆盖当前表单中已填写的人设内容，确定继续？', '覆盖确认', {
+        type: 'warning',
+      })
+    } catch {
+      return
+    }
+  }
+  personaGenerating.value = true
+  try {
+    const result = await generateAccountPersona(profileForm.accountId, {
+      requirements: req,
+      role: profileForm.role as any,
+    })
+    profileForm.voice = result.voice || ''
+    profileForm.interestsText = (result.interests || []).join(', ')
+    profileForm.quirks = result.quirks || ''
+    profileForm.never_say = result.never_say || ''
+    profileForm.background = result.background || ''
+    profileForm.lifeFactsText = (result.life_facts || []).join(', ')
+    profileForm.opinionsText = (result.signature_opinions || []).join(', ')
+    profileForm.themesText = (result.recurring_themes || []).join(', ')
+    if (result.subreddit_overrides && Object.keys(result.subreddit_overrides).length) {
+      profileForm.overridesText = JSON.stringify(result.subreddit_overrides, null, 2)
+    }
+    if (typeof result.suggested_daily_post_limit === 'number') {
+      profileForm.daily_post_limit = result.suggested_daily_post_limit
+    }
+    if (typeof result.suggested_daily_comment_limit === 'number') {
+      profileForm.daily_comment_limit = result.suggested_daily_comment_limit
+    }
+    ElMessage.success('人设已生成并填充，确认无误后点「保存」')
+  } finally {
+    personaGenerating.value = false
+  }
+}
 
 // ===== 社区库 =====
 const communities = ref<RedditCommunity[]>([])

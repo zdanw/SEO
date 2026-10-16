@@ -62,6 +62,8 @@ from app.schemas.reddit import (
     RedditMetricOut,
     RedditOAuthStartOut,
     RedditOverviewOut,
+    PersonaGenerateIn,
+    PersonaGenerateOut,
     RedditPostGenerateIn,
     RedditPostOut,
     RedditProductIn,
@@ -102,7 +104,7 @@ from app.services.reddit_mix import (
     resolve_intent,
     resolve_post_intent,
 )
-from app.services.reddit_persona import parse_persona
+from app.services.reddit_persona import generate_persona_config, parse_persona
 from app.services import reddit_oauth
 from app.tasks.reddit_campaign_tasks import trigger_campaign_tick
 from app.tasks.reddit_tasks import (
@@ -1771,6 +1773,49 @@ def update_account_profile(
     db.commit()
     db.refresh(profile)
     return _accounts_out(db, [account], ctx.site.id)[0]
+
+
+@router.post("/accounts/{account_id}/persona/generate", response_model=PersonaGenerateOut)
+def generate_account_persona(
+    account_id: int,
+    payload: PersonaGenerateIn,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+) -> PersonaGenerateOut:
+    """按需求描述用 LLM 生成人设配置（不落库，前端回填表单确认后再保存）。"""
+    account = reddit_oauth.get_site_account(db, ctx.site.id, account_id)
+    if not account:
+        raise HTTPException(status_code=404, detail="Reddit 账号不存在")
+    from app.services.reddit_persona import PERSONA_AI_DAILY_LIMIT
+    from app.utils.rate_limiter import get_redis
+
+    budget_key = f"reddit:persona:ai:{ctx.site.id}:{now_bj():%Y%m%d}"
+    try:
+        used = int(get_redis().get(budget_key) or 0)
+    except Exception:
+        used = 0
+    if used >= PERSONA_AI_DAILY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail=f"今日 AI 人设生成次数已达上限（{PERSONA_AI_DAILY_LIMIT} 次/站点/天）",
+        )
+    try:
+        ai = get_ai_client()
+    except DeepSeekError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        data = generate_persona_config(payload.requirements, role=payload.role, ai=ai)
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=f"AI 返回内容无法解析：{e}")
+    except DeepSeekError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    try:
+        r = get_redis()
+        r.incrby(budget_key, 1)
+        r.expire(budget_key, 172800)
+    except Exception:
+        pass
+    return PersonaGenerateOut(**data)
 
 
 # ============ 社区库 ============

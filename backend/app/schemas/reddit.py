@@ -72,6 +72,25 @@ class RedditAccountProfileUpdate(BaseModel):
     clear_warning: bool = False
 
 
+class PersonaGenerateIn(BaseModel):
+    requirements: str = Field(min_length=1, max_length=2000)
+    role: Optional[AccountRole] = None
+
+
+class PersonaGenerateOut(BaseModel):
+    voice: str = ""
+    interests: list[str] = []
+    quirks: str = ""
+    never_say: str = ""
+    background: str = ""
+    life_facts: list[str] = []
+    signature_opinions: list[str] = []
+    recurring_themes: list[str] = []
+    subreddit_overrides: dict[str, dict] = {}
+    suggested_daily_post_limit: int = Field(default=0, ge=0, le=20)
+    suggested_daily_comment_limit: int = Field(default=10, ge=0, le=100)
+
+
 class RedditCommunityBase(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     category: CommunityCategory = "core"
