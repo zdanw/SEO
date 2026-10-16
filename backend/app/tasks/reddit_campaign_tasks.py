@@ -117,6 +117,7 @@ def trigger_campaign_tick() -> bool:
 
 @celery_app.task(
     name="app.tasks.reddit_campaign_tasks.execute_campaign_action",
+    bind=True,
     soft_time_limit=_ACTION_SOFT_LIMIT,
     time_limit=_ACTION_HARD_LIMIT,
     max_retries=2,
