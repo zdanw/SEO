@@ -24,9 +24,28 @@ def test_production_rejects_debug_and_weak_secret():
 
 
 def test_production_rejects_default_db_password():
-    s = Settings(**{**_STRONG, "DB_PASSWORD": "seo_dev_pass"})
+    s = Settings(
+        **{
+            **_STRONG,
+            "DB_PASSWORD": "seo_dev_pass",
+            "DATABASE_URL": "postgresql+psycopg2://seo:seo_dev_pass@127.0.0.1:5432/seo_platform",
+        }
+    )
     with pytest.raises(RuntimeError, match="DB_PASSWORD"):
         s.validate_production()
+
+
+def test_production_accepts_external_db_url_with_default_db_password():
+    """外部 DATABASE_URL（如魔搭/Supabase）场景：凭证以连接串为准，未导出 DB_PASSWORD 不应阻断启动。"""
+    s = Settings(
+        **{
+            **_STRONG,
+            "DB_PASSWORD": "seo_dev_pass",
+            "DATABASE_URL": "postgresql://postgres.user:S7rong!DbPass@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres",
+        },
+        CORS_ORIGINS="https://app.example.com",
+    )
+    s.validate_production()
 
 
 def test_production_rejects_weak_database_url_password():

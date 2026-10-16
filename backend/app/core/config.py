@@ -6,6 +6,8 @@ from urllib.parse import unquote, urlparse
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_DEFAULT_DATABASE_URL = "postgresql+psycopg2://seo:seo_dev_pass@127.0.0.1:5432/seo_platform"
+
 _WEAK_SECRET_MARKERS = (
     "change-me",
     "please-change",
@@ -156,12 +158,13 @@ class Settings(BaseSettings):
         if len(key) < 32 or any(m in key.lower() for m in _WEAK_SECRET_MARKERS):
             errors.append("生产环境须设置长度≥32 且非默认占位符的 SECRET_KEY")
 
-        # 数据库凭证
-        if self._is_weak_credential(self.DB_PASSWORD):
-            errors.append("生产环境须设置强 DB_PASSWORD（≥8位，非默认/占位符）")
+        # 数据库凭证：database.py 只消费 DATABASE_URL，连接串内密码是唯一生效凭证；
+        # DB_PASSWORD 仅在未覆盖 DATABASE_URL（按 DB_* 装配默认连接串）时参与校验。
         db_url_password = self._url_credential(self.DATABASE_URL)
         if self._is_weak_credential(db_url_password):
             errors.append("生产环境 DATABASE_URL 中的数据库密码过弱或缺失")
+        if self.DATABASE_URL.strip() == _DEFAULT_DATABASE_URL and self._is_weak_credential(self.DB_PASSWORD):
+            errors.append("生产环境须设置强 DB_PASSWORD（≥8位，非默认/占位符）")
 
         # Redis / Celery 凭证
         if self._is_weak_credential(self.REDIS_PASSWORD):
