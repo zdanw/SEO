@@ -128,6 +128,11 @@ def _plan_time(db: Session, account_id: int, now: datetime, hour_start: int, hou
     不得小于 MIN_ACTION_GAP_MINUTES——否则单个排在窗口尾部的 pending 动作会把
     当天后续排期全部顶出窗口（排期饿死）。今日窗口无空档时顺延到下一个窗口
     起点（跨天由调用方按“不跨天排期”规则跳过）。
+
+    忙碌区间按**账号全局**查询、刻意不过滤 campaign_id：同一账号在多个
+    campaign 之间的动作同样必须保持最小间隔（账号级风控硬约束）。若按
+    campaign 过滤，两个共用账号的 campaign 会把动作排到相邻分钟，形成
+    机器人特征——勿改。
     """
     gap = timedelta(minutes=MIN_ACTION_GAP_MINUTES)
     if _in_active_window(now.hour, hour_start, hour_end):
@@ -396,6 +401,7 @@ def _create_campaign_post(
     now: datetime | None = None,
     daily_cap: int = 0,
     apply_cooldown: bool = True,
+    subreddits: list[str] | None = None,
 ) -> tuple[RedditCampaignAction | None, str | None]:
     """生成并落库一条 campaign 帖子；返回 (action, skip_reason)。
 
@@ -412,9 +418,11 @@ def _create_campaign_post(
     )
 
     site = db.get(ClientSite, campaign.site_id)
-    subreddits = _target_subreddits(
-        db, campaign, account, include_promo=bool(campaign.product_id)
-    )
+    # 调用方（_plan_posts）已算过目标社区时传入复用，省去重复查询
+    if subreddits is None:
+        subreddits = _target_subreddits(
+            db, campaign, account, include_promo=bool(campaign.product_id)
+        )
     if not subreddits:
         return None, None  # 无目标社区：静默跳过（配置问题，避免垃圾记录）
     subreddit = select_subreddit(
@@ -583,13 +591,16 @@ def _comment_candidates(
     *,
     now: datetime | None = None,
     apply_cooldown: bool = True,
+    subs: list[str] | None = None,
 ) -> list[dict]:
     """自动发现评论目标：campaign 社区/人设社区中未互动过的讨论帖。"""
     from app.services.reddit_community_rotation import order_subreddits
 
     if _discovery_paused(account.id):
         return []  # 账号级 429 退避中：跳过发现，等下个 tick
-    subs = _target_subreddits(db, campaign, account)
+    # 调用方（_plan_comments）已算过目标社区时传入复用，省去重复查询
+    if subs is None:
+        subs = _target_subreddits(db, campaign, account)
     if not subs:
         return []
     ordered = order_subreddits(
@@ -908,7 +919,12 @@ def _plan_self_upvotes(
     hour_start: int,
     hour_end: int,
 ) -> int:
-    """自己帖子点赞（提热度）：池内其他账号投票（voter != author，规避 Reddit 同号自赞判定）。"""
+    """自己帖子点赞（提热度）：池内其他账号投票（voter != author，规避 Reddit 同号自赞判定）。
+
+    self_upvote_delay_minutes 是自赞**截止窗口**而非定时点：只补赞发布已满
+    SELF_UPVOTE_MIN_AGE_MINUTES 分钟、且尚未超过 delay 分钟的帖子；超过
+    delay 的旧帖不再回头补赞（对旧帖突然投票本身也是异常特征）。
+    """
     if not campaign.self_upvote_enabled or remaining <= 0 or len(pool) < 2:
         return 0
     delay = campaign.self_upvote_delay_minutes or 240
@@ -931,10 +947,36 @@ def _plan_self_upvotes(
         .all()
     )
 
-    existing_dedups = {
-        row[0]
-        for row in db.query(RedditCampaignAction.dedup_key)
-        .filter(RedditCampaignAction.campaign_id == campaign.id)
+    if not posts:
+        return 0
+    # 候选批量反查（查询量 O(候选)，不随 campaign 历史增长）：
+    # 1) 已计划的自赞 dedup_key 只按"可能写入的键" IN 反查，替代该 campaign 全量加载
+    possible_keys = [
+        f"upvote_self:{voter.id}:{post.id}"
+        for post in posts
+        for voter in pool
+        if voter.id != post.account_id
+    ]
+    existing_dedups: set[str] = set()
+    if possible_keys:
+        existing_dedups = {
+            row[0]
+            for row in db.query(RedditCampaignAction.dedup_key)
+            .filter(
+                RedditCampaignAction.campaign_id == campaign.id,
+                RedditCampaignAction.dedup_key.in_(possible_keys),
+            )
+            .all()
+        }
+    # 2) 已投过赞的 (账号, thing) 对：一次批量查询，替代循环内逐对 N+1
+    already_pairs = {
+        (row[0], row[1])
+        for row in db.query(RedditVoteLog.account_id, RedditVoteLog.thing_id)
+        .filter(
+            RedditVoteLog.account_id.in_([a.id for a in pool]),
+            RedditVoteLog.thing_id.in_([p.reddit_post_id for p in posts]),
+            RedditVoteLog.direction == 1,
+        )
         .all()
     }
     planned = 0
@@ -947,16 +989,7 @@ def _plan_self_upvotes(
             dedup_key = f"upvote_self:{voter.id}:{post.id}"
             if dedup_key in existing_dedups:
                 continue
-            already = (
-                db.query(RedditVoteLog.id)
-                .filter(
-                    RedditVoteLog.account_id == voter.id,
-                    RedditVoteLog.thing_id == post.reddit_post_id,
-                    RedditVoteLog.direction == 1,
-                )
-                .first()
-            )
-            if already:
+            if (voter.id, post.reddit_post_id) in already_pairs:
                 continue
             planned_at = _plan_time(db, voter.id, now, hour_start, hour_end)
             if planned_at.date() != now.date():
@@ -1199,6 +1232,7 @@ def _plan_posts(db: Session, campaign: RedditCampaign, pool, now, remaining, hou
             now=now,
             daily_cap=cap,
             apply_cooldown=apply_cd,
+            subreddits=subs,
         )
         if action is None:
             continue  # 瞬时故障或 dedup 冲突，下个 tick 重试
@@ -1230,7 +1264,7 @@ def _plan_comments(db: Session, campaign: RedditCampaign, pool, now, remaining, 
         subs = _target_subreddits(db, campaign, account)
         apply_cd = not pool_is_small(n_accounts=len(pool), n_subs=len(subs))
         candidates = _comment_candidates(
-            db, campaign, account, now=now, apply_cooldown=apply_cd
+            db, campaign, account, now=now, apply_cooldown=apply_cd, subs=subs
         )
         if not candidates:
             continue

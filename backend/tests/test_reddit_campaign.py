@@ -305,6 +305,27 @@ def test_self_upvote_respects_existing_votes(db, site):
     assert rc._plan_self_upvotes(db, campaign, [a1, a2], datetime.utcnow(), 3, 0, 23) == 0
 
 
+def test_self_upvote_skips_existing_dedup_action(db, site):
+    """已计划过同键自赞动作（pending）时不再重复排期：dedup_key 按候选 IN 反查命中。"""
+    a1 = _account(db, site.id, "a1")
+    a2 = _account(db, site.id, "a2")
+    _profile(db, site.id, a1.id)
+    _profile(db, site.id, a2.id)
+    campaign = _campaign(db, site.id, self_upvote_enabled=True, daily_upvotes=5, account_ids=[a1.id, a2.id])
+    post = RedditPost(
+        site_id=site.id, account_id=a1.id, post_type="auto", subreddit="test",
+        keyword="", title="t", body="b", status="posted", reddit_post_id="t3_mine",
+        published_at=datetime.utcnow() - timedelta(minutes=60),
+    )
+    db.add(post)
+    db.commit()
+    _action(
+        db, campaign, a2, action_type="upvote_self", status="pending",
+        target_thing_id="t3_mine", dedup_key=f"upvote_self:{a2.id}:{post.id}",
+    )
+    assert rc._plan_self_upvotes(db, campaign, [a1, a2], datetime.utcnow(), 3, 0, 23) == 0
+
+
 # ============ 执行：claim / vote / 对账 ============
 def test_claim_action_is_atomic(db, site):
     campaign = _campaign(db, site.id)
