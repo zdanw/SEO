@@ -53,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 # ============ 随机化与风控参数 ============
 MIN_ACTION_GAP_MINUTES = 25      # 同账号相邻动作最小间隔（规避机器人特征）
+PLANNING_SPAN_HOURS = 4          # 当日排期规划跨度：配额摊在"从现在起 N 小时"内采样，
+                                 # 避免均匀铺满整个窗口导致动作间隔动辄 1-3 小时
 MAX_CONTENT_PER_TICK = 2         # 每 campaign 每 tick 最多生成内容条数（控制 AI 成本与 tick 耗时）
 MAX_UPVOTE_PLANS_PER_TICK = 5    # 每 campaign 每 tick 最多计划的点赞动作数
 STALE_EXECUTING_MINUTES = 15     # executing 僵尸回收阈值（分钟）
@@ -137,6 +139,11 @@ def _plan_time(db: Session, account_id: int, now: datetime, hour_start: int, hou
         end_t = start_t.replace(hour=hour_end % 24, minute=59, second=59, microsecond=0)
         if end_t <= start_t:
             end_t += timedelta(days=1)  # 跨午夜窗口（start > end）
+        # 规划跨度：只在 [start_t, min(窗口尾, start_t+N小时)] 内采样，间隔更紧凑；
+        # 窗口剩余不足 N 小时则用整个剩余窗口
+        span_end = start_t + timedelta(hours=PLANNING_SPAN_HOURS)
+        if end_t > span_end:
+            end_t = span_end
         busy = [
             as_bj_naive(p)
             for (p,) in db.query(RedditCampaignAction.planned_at)
