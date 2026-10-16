@@ -20,7 +20,8 @@ http.interceptors.request.use(
   (config: InternalAxiosRequestConfig) => {
     const token = localStorage.getItem('access_token')
     if (token && config.headers) {
-      config.headers.Authorization = `Bearer ${token}`
+      // 魔搭网关会拦截带 Authorization 头的请求（平台级 403），改用自定义头携带 JWT
+      config.headers['X-Auth-Token'] = token
     }
     // 站点 CRUD 本身不注入 X-Site-Id（按路径 site_id 鉴权）
     const url = config.url || ''

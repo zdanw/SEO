@@ -259,6 +259,34 @@ class RedditCampaignActionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class RedditBatchRetryIn(BaseModel):
+    action_ids: list[int] = Field(default_factory=list, max_length=100)
+
+
+class RedditBatchRetryItem(BaseModel):
+    action_id: int
+    ok: bool
+    detail: Optional[str] = None
+
+
+class RedditBatchRetryOut(BaseModel):
+    retried: int
+    skipped: int
+    items: list[RedditBatchRetryItem] = Field(default_factory=list)
+
+
+class RedditCampaignReportOut(BaseModel):
+    """Campaign 按日执行报告：配额达成与失败/跳过明细。"""
+
+    campaign_id: int
+    date: date
+    planned: int = 0
+    by_status: dict[str, int] = Field(default_factory=dict)
+    by_type: dict[str, int] = Field(default_factory=dict)
+    skip_reasons: dict[str, int] = Field(default_factory=dict)
+    failed_action_ids: list[int] = Field(default_factory=list)
+
+
 class RedditPostOut(BaseModel):
     id: int
     site_id: int

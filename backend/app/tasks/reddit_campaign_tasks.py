@@ -173,3 +173,32 @@ def expand_communities() -> dict:
         return run_community_expansion(db)
     finally:
         db.close()
+
+
+@celery_app.task(
+    name="app.tasks.reddit_campaign_tasks.community_feedback_calibration",
+    soft_time_limit=_TICK_SOFT_LIMIT,
+    time_limit=_TICK_HARD_LIMIT,
+)
+def community_feedback_calibration() -> dict:
+    """表现反馈校准（beat 每日）：低表现 account×社区 降权 + 冷却。
+
+    原 run_campaign_tick 每 15 分钟全量扫描一次，社区表现变化慢，
+    降频到每日（紧随每日指标同步之后执行），扫描查询已加 30 天回看窗口。
+    """
+    from app.models.client_site import ClientSite
+    from app.services.reddit_community_rotation import apply_feedback_calibration
+
+    db = SessionLocal()
+    calibrated = 0
+    try:
+        site_ids = [row[0] for row in db.query(ClientSite.id).all()]
+        for site_id in site_ids:
+            try:
+                calibrated += apply_feedback_calibration(db, site_id=site_id)
+            except Exception:  # noqa: BLE001 — 单站点失败不阻断其他
+                db.rollback()
+                logger.exception("Feedback calibration failed site=%s", site_id)
+        return {"sites": len(site_ids), "calibrated": calibrated}
+    finally:
+        db.close()

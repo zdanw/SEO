@@ -60,12 +60,15 @@ def upgrade() -> None:
         ["crawl_status", sa.text("time DESC")],
         unique=False,
     )
-    op.execute(
-        sa.text(
-            "SELECT create_hypertable('serp_rank_snapshots', 'time', "
-            "chunk_time_interval => INTERVAL '7 days', if_not_exists => true)"
+    if op.get_bind().execute(
+        sa.text("SELECT 1 FROM pg_available_extensions WHERE name='timescaledb'")
+    ).scalar():
+        op.execute(
+            sa.text(
+                "SELECT create_hypertable('serp_rank_snapshots', 'time', "
+                "chunk_time_interval => INTERVAL '7 days', if_not_exists => true)"
+            )
         )
-    )
 
 
 def downgrade() -> None:
@@ -84,9 +87,12 @@ def downgrade() -> None:
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("time", "search_query_id"),
     )
-    op.execute(
-        sa.text(
-            "SELECT create_hypertable('serp_rank_snapshots', 'time', "
-            "chunk_time_interval => INTERVAL '7 days', if_not_exists => true)"
+    if op.get_bind().execute(
+        sa.text("SELECT 1 FROM pg_available_extensions WHERE name='timescaledb'")
+    ).scalar():
+        op.execute(
+            sa.text(
+                "SELECT create_hypertable('serp_rank_snapshots', 'time', "
+                "chunk_time_interval => INTERVAL '7 days', if_not_exists => true)"
+            )
         )
-    )

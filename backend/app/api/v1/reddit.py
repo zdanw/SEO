@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Optional
 
 import logging
 
@@ -10,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.api.deps import SiteContext, get_current_user, get_site_context, require_site_write
 from app.core.database import get_db
@@ -32,12 +33,16 @@ from app.models.user import User
 from app.models.zernio_key import ZernioApiKey
 from app.schemas.reddit import (
     RedditAccountProfileUpdate,
+    RedditBatchRetryIn,
+    RedditBatchRetryItem,
+    RedditBatchRetryOut,
     RedditBrandIn,
     RedditBrandOut,
     RedditBrandUpdate,
     RedditCampaignActionOut,
     RedditCampaignCreate,
     RedditCampaignOut,
+    RedditCampaignReportOut,
     RedditCampaignUpdate,
     RedditCommentBatchGenerateIn,
     RedditCommentGenerateIn,
@@ -356,6 +361,112 @@ def _fill_comment_out(db: Session, comment: RedditComment) -> RedditComment:
     else:
         comment.campaign_name = None
     return comment
+
+
+def _fill_posts_out(db: Session, posts: list[RedditPost]) -> list[RedditPost]:
+    """列表批量填充（campaign 名/动作计划时间），消除逐条查询的 N+1。
+
+    account 关系由调用方用 joinedload 预载；此处只做 campaign/action 两次 IN 查询。
+    """
+    campaign_ids = {p.campaign_id for p in posts if p.campaign_id}
+    campaigns = (
+        {
+            c.id: c
+            for c in db.query(RedditCampaign.id, RedditCampaign.name)
+            .filter(RedditCampaign.id.in_(campaign_ids))
+            .all()
+        }
+        if campaign_ids
+        else {}
+    )
+    need_action = [p.id for p in posts if p.campaign_id and p.scheduled_at is None]
+    latest_planned: dict[int, object] = {}
+    if need_action:
+        for pid, planned in (
+            db.query(RedditCampaignAction.post_id, RedditCampaignAction.planned_at)
+            .filter(
+                RedditCampaignAction.post_id.in_(need_action),
+                RedditCampaignAction.action_type == "post",
+            )
+            .order_by(RedditCampaignAction.id.asc())
+            .all()
+        ):
+            latest_planned[pid] = planned  # id 升序后写覆盖 = 最新动作
+    for p in posts:
+        if p.account:
+            p.account_name = reddit_oauth.display_reddit_name(p.account.account_name)
+        p.planned_at = p.scheduled_at
+        if p.campaign_id:
+            campaign = campaigns.get(p.campaign_id)
+            p.campaign_name = campaign.name if campaign else None
+            if p.scheduled_at is None and p.id in latest_planned:
+                p.planned_at = latest_planned[p.id]
+        else:
+            p.campaign_name = None
+    return posts
+
+
+def _fill_comments_out(db: Session, comments: list[RedditComment]) -> list[RedditComment]:
+    """评论列表批量填充（brand/product/campaign/动作计划时间），消除 N+1。"""
+    brand_ids = {c.brand_id for c in comments if c.brand_id}
+    product_ids = {c.product_id for c in comments if c.product_id}
+    campaign_ids = {c.campaign_id for c in comments if c.campaign_id}
+    brands = (
+        {
+            b.id: b.name
+            for b in db.query(RedditBrand.id, RedditBrand.name)
+            .filter(RedditBrand.id.in_(brand_ids))
+            .all()
+        }
+        if brand_ids
+        else {}
+    )
+    products = (
+        {
+            p.id: p.name
+            for p in db.query(RedditProduct.id, RedditProduct.name)
+            .filter(RedditProduct.id.in_(product_ids))
+            .all()
+        }
+        if product_ids
+        else {}
+    )
+    campaigns = (
+        {
+            c.id: c.name
+            for c in db.query(RedditCampaign.id, RedditCampaign.name)
+            .filter(RedditCampaign.id.in_(campaign_ids))
+            .all()
+        }
+        if campaign_ids
+        else {}
+    )
+    need_action = [c.id for c in comments if c.campaign_id and c.scheduled_at is None]
+    latest_planned: dict[int, object] = {}
+    if need_action:
+        for cid, planned in (
+            db.query(RedditCampaignAction.comment_id, RedditCampaignAction.planned_at)
+            .filter(
+                RedditCampaignAction.comment_id.in_(need_action),
+                RedditCampaignAction.action_type == "comment",
+            )
+            .order_by(RedditCampaignAction.id.asc())
+            .all()
+        ):
+            latest_planned[cid] = planned
+    for c in comments:
+        if c.account:
+            c.account_name = reddit_oauth.display_reddit_name(c.account.account_name)
+        c.brand_name = brands.get(c.brand_id) if c.brand_id else None
+        c.product_name = products.get(c.product_id) if c.product_id else None
+        c.planned_at = c.scheduled_at
+        if c.campaign_id:
+            c.campaign_name = campaigns.get(c.campaign_id)
+            if c.scheduled_at is None and c.id in latest_planned:
+                c.planned_at = latest_planned[c.id]
+        else:
+            c.campaign_name = None
+    return comments
 
 
 def _product_out(product: RedditProduct) -> RedditProductOut:
@@ -712,6 +823,7 @@ def generate_post(
         site_url=generated["site_url"],
         status="pending_review",
         content_intent=generated["intent"],
+        narrative_angle=generated.get("angle"),
         ai_risk=generated.get("ai_risk"),
         ai_score=generated.get("ai_score"),
     )
@@ -742,9 +854,14 @@ def list_posts(
         q = q.filter(RedditPost.account_id == account_id)
     if status_filter:
         q = q.filter(RedditPost.status == status_filter)
-    posts = q.order_by(RedditPost.created_at.desc()).limit(100).all()
+    posts = (
+        q.options(joinedload(RedditPost.account))
+        .order_by(RedditPost.created_at.desc())
+        .limit(100)
+        .all()
+    )
     seq = _queue_numbers(db, RedditPost, ctx.site.id, {p.account_id for p in posts})
-    out = [_fill_post_out(p, db) for p in posts]
+    out = _fill_posts_out(db, posts)
     for p in out:
         p.queue_no = seq.get(p.id)
     return out
@@ -971,7 +1088,10 @@ def _generate_comment_for_url(
         resolved_brand_id = brand.id
         resolved_product_id = product.id
     from app.services.reddit_community_rotation import (
+        COMMENT_SIMILARITY_CORPUS_SIZE,
+        COMMENT_SIMILARITY_REGEN_THRESHOLD,
         angle_hint as _angle_hint,
+        max_ngram_similarity,
         pick_angle,
         recent_angles,
         record_activity,
@@ -986,8 +1106,7 @@ def _generate_comment_for_url(
         from app.services.reddit_style import fetch_community_examples
 
         community_examples = fetch_community_examples(client, subreddit)
-        generated = generate_comment_pipeline(
-            ai,
+        pipeline_kwargs = dict(
             post_title=title,
             post_body=body,
             subreddit=subreddit,
@@ -1001,11 +1120,50 @@ def _generate_comment_for_url(
             seed=account.id + len(title),
             community_examples=community_examples,
             site_id=ctx.site.id,
-            angle_hint=angle_hint,
         )
+        generated = generate_comment_pipeline(ai, angle_hint=angle_hint, **pipeline_kwargs)
         comment_body = generated.body
         ai_risk = generated.ai_risk
         ai_score = generated.ai_score_after_humanize
+
+        # 评论雷同检测：与本账号近 10 条已发布评论做 3-gram 相似度检查，
+        # 超过阈值则换一个角度重生成一次，取相似度更低的版本（失败保留原稿）
+        try:
+            recent_bodies = [
+                r[0]
+                for r in db.query(RedditComment.body)
+                .filter(
+                    RedditComment.account_id == account.id,
+                    RedditComment.status == "posted",
+                )
+                .order_by(RedditComment.id.desc())
+                .limit(COMMENT_SIMILARITY_CORPUS_SIZE)
+                .all()
+            ]
+            sim = max_ngram_similarity(comment_body, recent_bodies)
+            if recent_bodies and sim > COMMENT_SIMILARITY_REGEN_THRESHOLD:
+                alt_angle = pick_angle([angle_tag])
+                alt = generate_comment_pipeline(
+                    ai,
+                    angle_hint=_angle_hint(alt_angle),
+                    seed=account.id + len(title) + 17,
+                    **pipeline_kwargs,
+                )
+                alt_sim = max_ngram_similarity(alt.body, recent_bodies)
+                if alt_sim < sim:
+                    comment_body = alt.body
+                    ai_risk = alt.ai_risk
+                    ai_score = alt.ai_score_after_humanize
+                    angle_tag = alt_angle
+                    logger.info(
+                        "Comment regenerated for similarity: account=%s sub=%s sim=%.2f→%.2f",
+                        account.id,
+                        subreddit,
+                        sim,
+                        alt_sim,
+                    )
+        except DeepSeekError:
+            logger.warning("Comment similarity regen failed; keeping original", exc_info=True)
     except DeepSeekError as exc:
         raise HTTPException(status_code=502, detail=f"AI 服务不可用：{exc}") from exc
 
@@ -1098,9 +1256,14 @@ def list_comments(
         q = q.filter(RedditComment.account_id == account_id)
     if status_filter:
         q = q.filter(RedditComment.status == status_filter)
-    comments = q.order_by(RedditComment.created_at.desc()).limit(100).all()
+    comments = (
+        q.options(joinedload(RedditComment.account))
+        .order_by(RedditComment.created_at.desc())
+        .limit(100)
+        .all()
+    )
     seq = _queue_numbers(db, RedditComment, ctx.site.id, {c.account_id for c in comments})
-    out = [_fill_comment_out(db, c) for c in comments]
+    out = _fill_comments_out(db, comments)
     for c in out:
         c.queue_no = seq.get(c.id)
     return out
@@ -2419,15 +2582,15 @@ def list_campaign_actions(
     return out
 
 
-@router.post("/automation/actions/{action_id}/retry", response_model=RedditCampaignActionOut)
-def retry_campaign_action(
-    action_id: int,
-    db: Session = Depends(get_db),
-    ctx: SiteContext = Depends(require_site_write),
-):
+def _retry_one_action(db: Session, ctx: SiteContext, action_id: int) -> tuple[bool, str | None]:
+    """重试单条失败动作（单条/批量共用）：返回 (ok, 失败原因)。
+
+    点赞类回 pending + planned_at=now 并触发 tick；post/comment 类同步重置关联内容
+    并立即入队发布，避免 reconcile 又把动作标回 failed。
+    """
     action = db.get(RedditCampaignAction, action_id)
     if not action:
-        raise HTTPException(status_code=404, detail="动作记录不存在")
+        return False, "动作记录不存在"
     campaign = (
         db.query(RedditCampaign)
         .filter(
@@ -2437,45 +2600,130 @@ def retry_campaign_action(
         .first()
     )
     if not campaign:
-        raise HTTPException(status_code=404, detail="动作记录不存在")
+        return False, "动作记录不存在"
     if action.status != "failed":
-        raise HTTPException(status_code=400, detail="仅失败的动作可重试")
+        return False, "仅失败的动作可重试"
 
     now = now_bj()
     action.status = "pending"
     action.error_message = None
 
     if action.action_type in ("upvote_related", "upvote_self"):
-        # 点赞：回队列由下一轮 tick（或立即触发的 tick）执行
         action.planned_at = now
         db.commit()
         db.refresh(action)
         trigger_campaign_tick()
-    else:
-        # 发帖/评论：同步重置关联内容并立即入队发布，避免 reconcile 又把动作标回失败
-        content = None
-        kind = None
-        if action.post_id:
-            content = db.get(RedditPost, action.post_id)
-            kind = "post"
-        elif action.comment_id:
-            content = db.get(RedditComment, action.comment_id)
-            kind = "comment"
-        if content is None:
-            raise HTTPException(status_code=400, detail="关联内容已删除，无法重试")
-        content.status = "approved"
-        content.scheduled_at = now
-        content.error_message = None
-        db.commit()
-        db.refresh(action)
-        try:
-            task = publish_reddit_post_by_id if kind == "post" else publish_reddit_comment_by_id
-            try_enqueue_publish(kind, content.id, task)
-        except Exception:
-            logger.warning("Retry enqueue publish failed for campaign action #%s", action_id, exc_info=True)
-            # 入队失败不阻断：发布扫描任务会在 ≤15 分钟内拾取 approved + 到期的内容
+        return True, None
 
+    content = None
+    kind = None
+    if action.post_id:
+        content = db.get(RedditPost, action.post_id)
+        kind = "post"
+    elif action.comment_id:
+        content = db.get(RedditComment, action.comment_id)
+        kind = "comment"
+    if content is None:
+        db.rollback()
+        return False, "关联内容已删除，无法重试"
+    content.status = "approved"
+    content.scheduled_at = now
+    content.error_message = None
+    db.commit()
+    db.refresh(action)
+    try:
+        task = publish_reddit_post_by_id if kind == "post" else publish_reddit_comment_by_id
+        try_enqueue_publish(kind, content.id, task)
+    except Exception:
+        logger.warning("Retry enqueue publish failed for campaign action #%s", action_id, exc_info=True)
+        # 入队失败不阻断：发布扫描任务会在 ≤15 分钟内拾取 approved + 到期的内容
+    return True, None
+
+
+@router.post("/automation/actions/{action_id}/retry", response_model=RedditCampaignActionOut)
+def retry_campaign_action(
+    action_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    ok, detail = _retry_one_action(db, ctx, action_id)
+    if not ok:
+        status_code = 404 if detail == "动作记录不存在" else 400
+        raise HTTPException(status_code=status_code, detail=detail)
+    action = db.get(RedditCampaignAction, action_id)
     item = RedditCampaignActionOut.model_validate(action)
     account = db.get(SocialAccount, action.account_id)
     item.account_name = account.account_name if account else None
     return item
+
+
+@router.post("/automation/actions/retry", response_model=RedditBatchRetryOut)
+def retry_campaign_actions_batch(
+    payload: RedditBatchRetryIn,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(require_site_write),
+):
+    """批量重试失败动作：逐条独立执行，单条失败不影响其他。"""
+    items: list[RedditBatchRetryItem] = []
+    retried = 0
+    for action_id in dict.fromkeys(payload.action_ids):  # 去重保序
+        try:
+            ok, detail = _retry_one_action(db, ctx, action_id)
+        except Exception as exc:  # noqa: BLE001 — 单条异常不阻断批量
+            db.rollback()
+            ok, detail = False, str(exc)[:200]
+        items.append(RedditBatchRetryItem(action_id=action_id, ok=ok, detail=detail))
+        if ok:
+            retried += 1
+    return RedditBatchRetryOut(retried=retried, skipped=len(items) - retried, items=items)
+
+
+@router.get("/automation/campaigns/{campaign_id}/report", response_model=RedditCampaignReportOut)
+def campaign_daily_report(
+    campaign_id: int,
+    date: Optional[str] = Query(default=None, description="YYYY-MM-DD，默认今天（北京时间）"),
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(get_site_context),
+):
+    """Campaign 按日执行报告：按 planned_at 归属日统计配额达成、失败/跳过明细。"""
+    campaign = _campaign_or_404(db, ctx, campaign_id)
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d").date() if date else now_bj().date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
+    day_start = datetime(day.year, day.month, day.day)
+    rows = (
+        db.query(
+            RedditCampaignAction.status,
+            RedditCampaignAction.action_type,
+            RedditCampaignAction.skip_reason,
+            RedditCampaignAction.id,
+        )
+        .filter(
+            RedditCampaignAction.campaign_id == campaign.id,
+            RedditCampaignAction.planned_at.isnot(None),
+            RedditCampaignAction.planned_at >= day_start,
+            RedditCampaignAction.planned_at < day_start + timedelta(days=1),
+        )
+        .all()
+    )
+    by_status: dict[str, int] = {}
+    by_type: dict[str, int] = {}
+    skip_reasons: dict[str, int] = {}
+    failed_ids: list[int] = []
+    for st, at, reason, aid in rows:
+        by_status[st] = by_status.get(st, 0) + 1
+        by_type[at] = by_type.get(at, 0) + 1
+        if st == "skipped" and reason:
+            skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
+        if st == "failed":
+            failed_ids.append(aid)
+    return RedditCampaignReportOut(
+        campaign_id=campaign.id,
+        date=day,
+        planned=len(rows),
+        by_status=by_status,
+        by_type=by_type,
+        skip_reasons=skip_reasons,
+        failed_action_ids=failed_ids,
+    )

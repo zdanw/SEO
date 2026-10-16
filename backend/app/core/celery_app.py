@@ -68,8 +68,17 @@ celery_app.conf.update(
             "task": "app.tasks.reddit_campaign_tasks.expand_communities",
             "schedule": crontab(hour=4, minute=17),
         },
+        # Reddit：每日指标同步（按帖子 ID 直查互动数据，反馈闭环的数据源）
+        "reddit-sync-post-metrics": {
+            "task": "app.tasks.reddit_tasks.sync_reddit_post_metrics",
+            "schedule": crontab(hour=3, minute=47),
+        },
+        # Reddit：每日表现反馈校准（低表现社区降权+冷却，紧随指标同步之后）
+        "reddit-community-feedback-calibration": {
+            "task": "app.tasks.reddit_campaign_tasks.community_feedback_calibration",
+            "schedule": crontab(hour=4, minute=37),
+        },
         # 已移除的固定调度（按需可手动/API 触发，任务本身仍注册）：
-        # SERP 全量抓取、代理健康检测、SERP 失败率告警、
-        # Reddit 帖子指标同步、账号健康检查、智能发现讨论
+        # SERP 全量抓取、代理健康检测、SERP 失败率告警、账号健康检查、智能发现讨论
     },
 )

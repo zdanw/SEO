@@ -303,6 +303,53 @@ def _ai_budget_consume(site_id: int, n: int = 1) -> None:
         logger.debug("ai budget consume failed", exc_info=True)
 
 
+# ============ 发现限流退避（账号级 429 时跳过本轮候选发现）============
+DISCOVERY_BACKOFF_SECONDS = 30 * 60
+
+
+def _discovery_paused(account_id: int) -> bool:
+    from app.utils.rate_limiter import get_redis
+
+    try:
+        return bool(get_redis().get(f"backoff:reddit:discovery:{account_id}"))
+    except Exception:
+        return False
+
+
+def _mark_discovery_backoff(account_id: int, exc: Exception) -> None:
+    """账号级 Reddit 429 后写入退避标记：本轮及下一 tick 的发现直接跳过，防雪崩。"""
+    from app.utils.rate_limiter import get_redis
+
+    try:
+        get_redis().set(
+            f"backoff:reddit:discovery:{account_id}", "1", ex=DISCOVERY_BACKOFF_SECONDS
+        )
+    except Exception:
+        logger.debug("discovery backoff write failed", exc_info=True)
+    logger.warning(
+        "Reddit discovery backoff %ss for account #%s: %s",
+        DISCOVERY_BACKOFF_SECONDS,
+        account_id,
+        str(exc)[:200],
+    )
+
+
+# ============ 发布 ETA 直投 ============
+def _try_direct_dispatch(db: Session, kind: str, item_id: int, run_at: datetime) -> None:
+    """到点直投发布任务（beat 15 分钟扫描降级为兜底）；失败静默由扫描拾取。"""
+    try:
+        from app.tasks.reddit_tasks import (
+            publish_reddit_comment_by_id,
+            publish_reddit_post_by_id,
+            schedule_publish,
+        )
+
+        task = publish_reddit_post_by_id if kind == "post" else publish_reddit_comment_by_id
+        schedule_publish(db, kind, item_id, task, run_at)
+    except Exception:  # noqa: BLE001 — broker 不可用时降级为发布扫描拾取
+        logger.debug("Direct publish dispatch failed kind=%s id=%s", kind, item_id, exc_info=True)
+
+
 # ============ 动作写入 ============
 def _insert_action(db: Session, **kwargs) -> RedditCampaignAction | None:
     """插入动作记录；unique(campaign_id, dedup_key) 冲突时返回 None（防重复计划）。"""
@@ -350,7 +397,9 @@ def _create_campaign_post(
     """
     from app.services.reddit_content import generate_post_content
     from app.services.reddit_community_rotation import (
-        pick_post_type,
+        pick_angle_weighted,
+        pick_post_type_weighted,
+        recent_angles,
         record_activity,
         select_subreddit,
     )
@@ -396,7 +445,9 @@ def _create_campaign_post(
         .all()
         if r[0]
     ]
-    post_type = pick_post_type(recent_types)
+    # 类型轮转 + 近 30 天表现加权；角度同理（低样本自动退化为纯轮转）
+    post_type = pick_post_type_weighted(db, account.id, recent_types)
+    angle_tag = pick_angle_weighted(db, account.id, recent_angles(db, account.id, subreddit))
 
     try:
         generated = generate_post_content(
@@ -408,6 +459,7 @@ def _create_campaign_post(
             allow_product=allow_product,
             include_site_url=allow_product,
             product_id=campaign.product_id,
+            angle_tag=angle_tag,
         )
     except DeepSeekError as exc:
         logger.warning("Campaign post AI failed campaign=%s account=%s: %s", campaign.id, account.id, exc)
@@ -438,6 +490,7 @@ def _create_campaign_post(
         site_url=generated["site_url"],
         content_intent=generated["intent"],
         campaign_id=campaign.id,
+        narrative_angle=generated.get("angle"),
         ai_risk=generated.get("ai_risk"),
         ai_score=generated.get("ai_score"),
     )
@@ -508,6 +561,9 @@ def _create_campaign_post(
     if action is None:
         # 并发下 dedup 冲突：内容保留（review 可审 / auto 会按点发布），不重复计动作
         return None, None
+    if post.status == "approved" and post.scheduled_at is not None:
+        # ETA 直投：到点即发，发布扫描降级为兜底
+        _try_direct_dispatch(db, "post", post.id, planned_at)
     return action, None
 
 
@@ -524,6 +580,8 @@ def _comment_candidates(
     """自动发现评论目标：campaign 社区/人设社区中未互动过的讨论帖。"""
     from app.services.reddit_community_rotation import order_subreddits
 
+    if _discovery_paused(account.id):
+        return []  # 账号级 429 退避中：跳过发现，等下个 tick
     subs = _target_subreddits(db, campaign, account)
     if not subs:
         return []
@@ -543,28 +601,9 @@ def _comment_candidates(
 
             terms = product_search_terms(keywords=[r.keyword for r in (product.keyword_rows or [])])
 
-    seen_things = {
-        row[0]
-        for row in db.query(RedditComment.target_thing_id)
-        .filter(
-            RedditComment.account_id == account.id,
-            RedditComment.site_id == campaign.site_id,
-        )
-        .all()
-    }
-    seen_things |= {
-        row[0]
-        for row in db.query(RedditCampaignAction.target_thing_id)
-        .filter(
-            RedditCampaignAction.site_id == campaign.site_id,
-            RedditCampaignAction.account_id == account.id,
-            RedditCampaignAction.action_type == "comment",
-        )
-        .all()
-    }
-
     client = get_reddit_client_for_account(account)
     candidates: list[dict] = []
+    seen_ids: set[str] = set()
     for sub in ordered:
         try:
             if terms:
@@ -574,14 +613,17 @@ def _comment_candidates(
                 keyword = ""
                 items = client.list_feed(sub, limit=8)
         except RedditApiError as exc:
-            logger.warning("Campaign comment discovery failed sub=%s: %s", sub, exc)
-            continue
+            # 账号级 429：整轮发现必失败，写退避并停止遍历后续社区
+            _mark_discovery_backoff(account.id, exc)
+            break
+        batch: list[dict] = []
         for item in items:
             thing_id = str(item.get("thing_id") or "")
             url = item.get("url") or ""
-            if not thing_id or not url or thing_id in seen_things:
+            if not thing_id or not url or thing_id in seen_ids:
                 continue
-            candidates.append(
+            seen_ids.add(thing_id)
+            batch.append(
                 {
                     "url": url,
                     "thing_id": thing_id,
@@ -591,9 +633,47 @@ def _comment_candidates(
                     "keyword": keyword,
                 }
             )
+        # 按候选批量反查该账号已评论/已计划评论的目标，替代全量历史加载
+        seen_things = _seen_comment_things(
+            db, campaign.site_id, account.id, [b["thing_id"] for b in batch]
+        )
+        for cand in batch:
+            if cand["thing_id"] in seen_things:
+                continue
+            candidates.append(cand)
             if len(candidates) >= limit:
                 return candidates
     return candidates
+
+
+def _seen_comment_things(
+    db: Session, site_id: int, account_id: int, thing_ids: list[str]
+) -> set[str]:
+    """候选中该账号已评论或已计划评论的 thing_id（按候选 IN 反查，避免全量历史加载）。"""
+    if not thing_ids:
+        return set()
+    seen = {
+        row[0]
+        for row in db.query(RedditComment.target_thing_id)
+        .filter(
+            RedditComment.account_id == account_id,
+            RedditComment.site_id == site_id,
+            RedditComment.target_thing_id.in_(thing_ids),
+        )
+        .all()
+    }
+    seen |= {
+        row[0]
+        for row in db.query(RedditCampaignAction.target_thing_id)
+        .filter(
+            RedditCampaignAction.site_id == site_id,
+            RedditCampaignAction.account_id == account_id,
+            RedditCampaignAction.action_type == "comment",
+            RedditCampaignAction.target_thing_id.in_(thing_ids),
+        )
+        .all()
+    }
+    return seen
 
 
 def _create_campaign_comment(
@@ -668,27 +748,40 @@ def _create_campaign_comment(
     )
     if action is None:
         return None, None
+    if comment.status == "approved" and comment.scheduled_at is not None:
+        # ETA 直投：到点即发，发布扫描降级为兜底
+        _try_direct_dispatch(db, "comment", comment.id, planned_at)
     return action, skip_reason
 
 
 # ============ 点赞动作 ============
-def _site_voted_things(db: Session, site_id: int) -> set[str]:
+def _voted_things_among(db: Session, site_id: int, thing_ids: list[str]) -> set[str]:
+    """候选中已被本站任一账号投过赞的 thing_id（按候选 IN 反查，避免全站集合加载）。"""
+    if not thing_ids:
+        return set()
     return {
         row[0]
         for row in db.query(RedditVoteLog.thing_id)
-        .filter(RedditVoteLog.site_id == site_id, RedditVoteLog.direction == 1)
+        .filter(
+            RedditVoteLog.site_id == site_id,
+            RedditVoteLog.direction == 1,
+            RedditVoteLog.thing_id.in_(thing_ids),
+        )
         .all()
     }
 
 
-def _site_actioned_things(db: Session, site_id: int) -> set[str]:
+def _actioned_things_among(db: Session, site_id: int, thing_ids: list[str]) -> set[str]:
+    """候选中已有本站点赞计划/动作的 thing_id（按候选 IN 反查）。"""
+    if not thing_ids:
+        return set()
     return {
         row[0]
         for row in db.query(RedditCampaignAction.target_thing_id)
         .filter(
             RedditCampaignAction.site_id == site_id,
             RedditCampaignAction.action_type.in_(_UPVOTE_TYPES),
-            RedditCampaignAction.target_thing_id.isnot(None),
+            RedditCampaignAction.target_thing_id.in_(thing_ids),
         )
         .all()
     }
@@ -709,6 +802,8 @@ def _plan_related_upvotes(
     if remaining <= 0 or not pool:
         return 0
     searcher = random.choice(pool)
+    if _discovery_paused(searcher.id):
+        return 0  # 账号级 429 退避中：跳过发现，等下个 tick
     client = get_reddit_client_for_account(searcher)
     subs = _target_subreddits(db, campaign, searcher)
     if not subs:
@@ -725,10 +820,11 @@ def _plan_related_upvotes(
 
             terms = product_search_terms(keywords=[r.keyword for r in (product.keyword_rows or [])])
 
-    excluded = _site_voted_things(db, campaign.site_id) | _site_actioned_things(db, campaign.site_id)
+    excluded: set[str] = set()
     pool_names = {(a.account_name or "").lower() for a in pool}
     cutoff = now_bj() - timedelta(days=UPVOTE_RELATED_MAX_AGE_DAYS)
     candidates: list[dict] = []
+    seen_ids: set[str] = set()
     for sub in ordered_subs:
         try:
             if terms:
@@ -738,13 +834,16 @@ def _plan_related_upvotes(
                 keyword = ""
                 items = client.list_feed(sub, limit=10)
         except RedditApiError as exc:
-            logger.warning("Campaign upvote discovery failed sub=%s: %s", sub, exc)
-            continue
+            # 账号级 429：整轮发现必失败，写退避并停止遍历后续社区
+            _mark_discovery_backoff(searcher.id, exc)
+            break
+        batch: list[dict] = []
         for item in items:
             thing_id = str(item.get("thing_id") or "")
             url = item.get("url") or ""
-            if not thing_id or not url or thing_id in excluded:
+            if not thing_id or not url or thing_id in seen_ids:
                 continue
+            seen_ids.add(thing_id)
             author = (item.get("author") or "").lower()
             if author and author in pool_names:
                 continue  # 池内互赞自己人帖子无意义
@@ -754,7 +853,15 @@ def _plan_related_upvotes(
             created_utc = int(item.get("created_utc") or 0)
             if created_utc and from_epoch_bj(created_utc) < cutoff:
                 continue
-            candidates.append({"thing_id": thing_id, "url": url})
+            batch.append({"thing_id": thing_id, "url": url})
+        # 按候选批量反查已投票/已排期目标，替代全站集合加载（查询量 O(候选) 不随历史增长）
+        excluded = _voted_things_among(
+            db, campaign.site_id, [b["thing_id"] for b in batch]
+        ) | _actioned_things_among(db, campaign.site_id, [b["thing_id"] for b in batch])
+        for cand in batch:
+            if cand["thing_id"] in excluded:
+                continue
+            candidates.append(cand)
             if len(candidates) >= remaining * 2:
                 break
         if len(candidates) >= remaining * 2:
@@ -990,6 +1097,16 @@ def execute_action(db: Session, action_id: int, attempt: int = 0) -> dict:
         client = get_reddit_client_for_account(account)
         client.vote(action.target_thing_id, 1)
 
+        # 投票效果验证：best-effort 快照投票后目标帖分数，失败不影响动作本身
+        score_at_vote = None
+        if action.target_thing_id.startswith("t3_"):
+            try:
+                item = client.get_post_by_id(action.target_thing_id, "")
+                if item:
+                    score_at_vote = int(item.get("score") or 0)
+            except Exception:  # noqa: BLE001 — 快照属附属数据
+                logger.debug("score_at_vote snapshot failed", exc_info=True)
+
         log = (
             db.query(RedditVoteLog)
             .filter(RedditVoteLog.account_id == action.account_id, RedditVoteLog.thing_id == action.target_thing_id)
@@ -999,6 +1116,7 @@ def execute_action(db: Session, action_id: int, attempt: int = 0) -> dict:
             log.direction = 1
             log.source = "campaign"
             log.campaign_action_id = action.id
+            log.score_at_vote = score_at_vote
             log.error_message = None
         else:
             db.add(
@@ -1007,6 +1125,7 @@ def execute_action(db: Session, action_id: int, attempt: int = 0) -> dict:
                     account_id=action.account_id,
                     thing_id=action.target_thing_id,
                     direction=1,
+                    score_at_vote=score_at_vote,
                     source="campaign",
                     campaign_action_id=action.id,
                 )
@@ -1224,15 +1343,8 @@ def run_campaign_tick(db: Session) -> dict:
     if recovered:
         logger.info("Campaign tick recovered %d stale actions", recovered)
 
-    # 表现反馈校准：低表现社区降权 + 冷却（幂等，冷却期内不重复罚分）
-    from app.services.reddit_community_rotation import apply_feedback_calibration
-
-    for site_id in {c.site_id for c in active}:
-        try:
-            apply_feedback_calibration(db, site_id=site_id, now=now)
-        except Exception:  # noqa: BLE001 — 校准失败不阻断调度
-            db.rollback()
-            logger.exception("Feedback calibration failed site=%s", site_id)
+    # 表现反馈校准已移至每日 beat 任务 reddit_community_feedback_calibration
+    # （社区表现变化慢，无需每 15 分钟全量扫描；且扫描查询已加 30 天回看窗口）
 
     summary = {"campaigns": len(active), "posts": 0, "comments": 0, "upvotes": 0, "skipped": 0}
     for campaign in active:

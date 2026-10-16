@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
@@ -55,6 +56,8 @@ class RedditPost(Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     content_intent: Mapped[str] = mapped_column(String(20), default="casual", nullable=False)
+    # 本次生成使用的叙事角度（personal_incident/hard_lesson/...），表现加权用
+    narrative_angle: Mapped[str | None] = mapped_column(String(40), nullable=True)
     ai_risk: Mapped[str | None] = mapped_column(String(20), nullable=True)
     ai_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     campaign_id: Mapped[int | None] = mapped_column(
@@ -66,6 +69,8 @@ class RedditPost(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
+
+    __table_args__ = (Index("ix_reddit_posts_status_scheduled", "status", "scheduled_at"),)
 
     account: Mapped["SocialAccount"] = relationship("SocialAccount")
     metrics: Mapped[list["RedditPostMetric"]] = relationship(
@@ -117,6 +122,8 @@ class RedditComment(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
     )
+
+    __table_args__ = (Index("ix_reddit_comments_status_scheduled", "status", "scheduled_at"),)
 
     account: Mapped["SocialAccount"] = relationship("SocialAccount")
 
@@ -364,6 +371,14 @@ class RedditCampaignAction(Base):
     __tablename__ = "reddit_campaign_actions"
     __table_args__ = (
         UniqueConstraint("campaign_id", "dedup_key", name="uq_campaign_action_dedup"),
+        # 排期引擎高频查询：账号维度取 pending/executing 忙碌区间 + campaign 配额统计
+        Index(
+            "ix_campaign_actions_account_status_planned",
+            "account_id",
+            "status",
+            "planned_at",
+        ),
+        Index("ix_campaign_actions_campaign_planned", "campaign_id", "planned_at"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -424,6 +439,8 @@ class RedditVoteLog(Base):
     )
     thing_id: Mapped[str] = mapped_column(String(50), nullable=False)
     direction: Mapped[int] = mapped_column(Integer, default=1, nullable=False)  # 1 / 0 / -1
+    # 投票时目标帖分数快照（best-effort）：验证投票效果 / 自赞后分数异常衰减检测
+    score_at_vote: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # campaign / manual
     source: Mapped[str] = mapped_column(String(20), default="manual", nullable=False)
     campaign_action_id: Mapped[int | None] = mapped_column(

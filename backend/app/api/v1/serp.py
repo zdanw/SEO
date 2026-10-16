@@ -88,7 +88,7 @@ def get_trends(
     sql = text(
         """
         SELECT keyword_id,
-               time_bucket('6 hours', time) AS bucket,
+               to_timestamp(floor(extract(epoch from time) / 21600) * 21600) AS bucket,
                avg(rank) AS avg_rank,
                max(crawl_status) AS last_status
         FROM serp_rank_snapshots

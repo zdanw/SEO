@@ -281,3 +281,84 @@ def test_expand_similar_communities_no_seed_returns_empty(db):
         )
         == []
     )
+
+
+# ============ 内容级表现反馈加权 ============
+def _content_post(db, acc, post_type, angle, scores):
+    post = RedditPost(
+        site_id=1, account_id=acc.id, post_type=post_type, subreddit="alpha",
+        keyword="", title="t", body="b", content_intent="casual",
+        narrative_angle=angle, status="posted", published_at=now_bj(),
+    )
+    db.add(post)
+    db.commit()
+    db.refresh(post)
+    for s in scores:  # 多次快照，synced_at 递增，取最新
+        db.add(RedditPostMetric(post_id=post.id, score=s))
+    db.commit()
+
+
+def test_content_performance_weights_uses_latest_metric(db):
+    acc = _acc(db)
+    _content_post(db, acc, "guide", "hard_lesson", [0, 2])  # 同帖两次快照，最新为 2
+    _content_post(db, acc, "guide", None, [2])
+    weights = rot.content_performance_weights(
+        db, account_id=acc.id, keys=["guide"], field="post_type"
+    )
+    # 每帖取最新快照：均分 2（若取全部原始快照均值 1.33 则权重不同）
+    assert weights["guide"] == pytest.approx(
+        rot.CONTENT_FEEDBACK_FLOOR
+        + 2 * (rot.CONTENT_FEEDBACK_CEIL - rot.CONTENT_FEEDBACK_FLOOR)
+        / rot.CONTENT_FEEDBACK_FULL_SCORE
+    )
+
+
+def test_content_performance_weights_thin_sample_neutral(db):
+    acc = _acc(db)
+    _content_post(db, acc, "vent", None, [0])  # 仅 1 次快照
+    weights = rot.content_performance_weights(
+        db, account_id=acc.id, keys=["vent"], field="post_type"
+    )
+    assert weights["vent"] == 1.0
+
+
+def test_content_performance_weights_floor_not_zero(db):
+    acc = _acc(db)
+    for _ in range(2):
+        _content_post(db, acc, "pitfall", None, [0])
+    weights = rot.content_performance_weights(
+        db, account_id=acc.id, keys=["pitfall"], field="post_type"
+    )
+    assert weights["pitfall"] == rot.CONTENT_FEEDBACK_FLOOR
+
+
+def test_pick_post_type_weighted_prefers_performer(db):
+    acc = _acc(db)
+    for _ in range(2):
+        _content_post(db, acc, "guide", None, [20])
+        _content_post(db, acc, "pitfall", None, [0])
+    rng = random.Random(11)
+    picks = [
+        rot.pick_post_type_weighted(db, acc.id, [], rng=rng) for _ in range(100)
+    ]
+    # guide 权重 4.0、其余中性 1.0、pitfall 0.3：guide 占比最高，pitfall 几乎绝迹
+    assert picks.count("guide") >= 40
+    assert picks.count("pitfall") <= 10
+
+
+def test_pick_angle_weighted_low_sample_falls_back_rotation(db):
+    acc = _acc(db)  # 无任何 metric 数据
+    picked = rot.pick_angle_weighted(db, acc.id, [], rng=random.Random(3))
+    assert picked in rot.ANGLE_LIBRARY
+
+
+# ============ 评论雷同检测 ============
+def test_max_ngram_similarity_bounds():
+    a = "the quick brown fox jumps over the lazy dog"
+    assert rot.max_ngram_similarity(a, [a]) == 1.0
+    assert rot.max_ngram_similarity(a, ["zzzz qqqq xxxxx"]) < 0.05
+    assert rot.max_ngram_similarity(a, []) == 0.0
+    assert rot.max_ngram_similarity("", [a]) == 0.0
+    # 轻度改写仍保持高相似
+    b = a.replace("quick", "quick.")  # 几乎不变
+    assert rot.max_ngram_similarity(a, [b]) > 0.8

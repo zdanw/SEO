@@ -82,6 +82,132 @@ def pick_post_type(recent: list[str] | None, *, rng: random.Random | None = None
     return rng.choice(POST_TYPE_ROTATION)
 
 
+# ============ 内容级表现反馈加权 ============
+CONTENT_FEEDBACK_LOOKBACK_DAYS = 30
+CONTENT_FEEDBACK_MIN_SAMPLES = 2   # 单维度样本不足 → 中性权重（回退纯轮转）
+CONTENT_FEEDBACK_FLOOR = 0.3       # 权重下限：表现再差也保底探索，不为 0
+CONTENT_FEEDBACK_CEIL = 4.0        # 权重上限：防止单类型/角度垄断
+CONTENT_FEEDBACK_FULL_SCORE = 8.0  # 均分达到该值视为满表现（映射到权重上限）
+
+
+def content_performance_weights(
+    db: Session, *, account_id: int, keys: list[str], field: str = "post_type"
+) -> dict[str, float]:
+    """按内容维度（post_type / narrative_angle）聚合近 30 天已发布帖子的最新分数。
+
+    返回 {key: weight}；weight = clamp(FLOOR + 均分线性映射到 [FLOOR, CEIL])，
+    均分 0 → FLOOR、≥ FULL_SCORE → CEIL、无数据/样本不足的 key 返回中性 1.0。
+    与社区级 apply_feedback_calibration 同源数据（RedditPostMetric 每帖最新快照），
+    但作用在内容维度：表现差的发帖类型/叙事角度被渐进降权。
+    """
+    if not keys:
+        return {}
+    score_col = getattr(RedditPost, field, None)
+    if score_col is None:
+        return {k: 1.0 for k in keys}
+    cutoff = now_bj() - timedelta(days=CONTENT_FEEDBACK_LOOKBACK_DAYS)
+    rows = (
+        db.query(score_col, RedditPost.id, RedditPostMetric.score)
+        .join(RedditPostMetric, RedditPostMetric.post_id == RedditPost.id)
+        .filter(
+            RedditPost.account_id == account_id,
+            RedditPost.status == "posted",
+            RedditPost.published_at.isnot(None),
+            RedditPost.published_at >= cutoff,
+            score_col.in_(keys),
+        )
+        # synced_at + id 双升序：后写覆盖 = 每帖最新快照（id 兜底同秒快照的确定性）
+        .order_by(RedditPostMetric.synced_at.asc(), RedditPostMetric.id.asc())
+        .all()
+    )
+    latest: dict[int, tuple[str, int]] = {}
+    for key, pid, score in rows:
+        latest[pid] = (str(key), int(score or 0))
+    buckets: dict[str, list[int]] = {}
+    for key, score in latest.values():
+        buckets.setdefault(key, []).append(score)
+    span = CONTENT_FEEDBACK_CEIL - CONTENT_FEEDBACK_FLOOR
+    weights: dict[str, float] = {}
+    for k in keys:
+        scores = buckets.get(k, [])
+        if len(scores) < CONTENT_FEEDBACK_MIN_SAMPLES:
+            weights[k] = 1.0
+        else:
+            mean = sum(scores) / len(scores)
+            weights[k] = max(
+                CONTENT_FEEDBACK_FLOOR,
+                min(CONTENT_FEEDBACK_CEIL, CONTENT_FEEDBACK_FLOOR + mean * span / CONTENT_FEEDBACK_FULL_SCORE),
+            )
+    return weights
+
+
+def _weighted_rotation_pick(
+    candidates: tuple[str, ...],
+    recent: list[str] | None,
+    weights: dict[str, float],
+    *,
+    rng: random.Random,
+) -> str:
+    """轮转规则（优先未用过）之上叠加表现权重；全用过则按权重挑最久未用的。"""
+    used = [str(x) for x in (recent or [])]
+    unused = [c for c in candidates if c not in used]
+    if unused:
+        return rng.choices(unused, weights=[weights.get(c, 1.0) for c in unused], k=1)[0]
+    for c in reversed(used):
+        if c in candidates:
+            return c
+    return rng.choice(candidates)
+
+
+def pick_post_type_weighted(
+    db: Session, account_id: int, recent: list[str] | None, *, rng: random.Random | None = None
+) -> str:
+    """发帖类型轮转 + 近 30 天表现加权（样本不足自动退化为纯轮转）。"""
+    rng = rng or random
+    weights = content_performance_weights(
+        db, account_id=account_id, keys=list(POST_TYPE_ROTATION), field="post_type"
+    )
+    return _weighted_rotation_pick(POST_TYPE_ROTATION, recent, weights, rng=rng)
+
+
+def pick_angle_weighted(
+    db: Session, account_id: int, recent: list[str] | None, *, rng: random.Random | None = None
+) -> str:
+    """叙事角度轮转 + 近 30 天表现加权（样本不足自动退化为纯轮转）。"""
+    rng = rng or random
+    weights = content_performance_weights(
+        db, account_id=account_id, keys=list(_DEFAULT_ANGLES), field="narrative_angle"
+    )
+    return _weighted_rotation_pick(_DEFAULT_ANGLES, recent, weights, rng=rng)
+
+
+def max_ngram_similarity(text: str, corpus: list[str], *, n: int = 3) -> float:
+    """text 与语料的最大字符 n-gram Jaccard 相似度（0-1）；用于评论雷同检测。"""
+    def grams(s: str) -> set[str]:
+        s = (s or "").strip().lower()
+        if len(s) < n:
+            return {s} if s else set()
+        return {s[i : i + n] for i in range(len(s) - n + 1)}
+
+    g1 = grams(text)
+    if not g1:
+        return 0.0
+    best = 0.0
+    for other in corpus or []:
+        g2 = grams(other)
+        if not g2:
+            continue
+        jac = len(g1 & g2) / len(g1 | g2)
+        if jac > best:
+            best = jac
+    return best
+
+
+# 评论与本账号近期已发布评论的雷同阈值：超过则换角度重生成一次
+COMMENT_SIMILARITY_REGEN_THRESHOLD = 0.55
+COMMENT_SIMILARITY_CORPUS_SIZE = 10
+
+
 # ============ 频次自适应 ============
 def per_sub_daily_cap(
     *,
@@ -340,11 +466,15 @@ def apply_feedback_calibration(
     min_samples: int = 2,
     penalty_step: float = 0.5,
     cooldown_days: int = 3,
+    lookback_days: int = 30,
 ) -> int:
     """低表现（account×社区）降权 + 冷却，返回被降权组合数。
 
     以每帖最新一次 metric 快照为准，均值低于阈值且样本足够时触发。
+    只回看近 lookback_days 天的快照：社区表现是近期信号，且限定窗口
+    避免随历史数据增长全量扫描（校准现由每日 beat 任务执行）。
     """
+    now_n = as_bj_naive(now or now_bj())
     rows = (
         db.query(
             RedditPost.id,
@@ -354,8 +484,11 @@ def apply_feedback_calibration(
             RedditPostMetric.synced_at,
         )
         .join(RedditPostMetric, RedditPostMetric.post_id == RedditPost.id)
-        .filter(RedditPost.site_id == site_id)
-        .order_by(RedditPostMetric.synced_at.asc())
+        .filter(
+            RedditPost.site_id == site_id,
+            RedditPostMetric.synced_at >= now_n - timedelta(days=lookback_days),
+        )
+        .order_by(RedditPostMetric.synced_at.asc(), RedditPostMetric.id.asc())
         .all()
     )
     if not rows:
@@ -369,7 +502,6 @@ def apply_feedback_calibration(
         groups.setdefault((account_id, normalize_subreddit(subreddit)), []).append(score)
 
     affected = 0
-    now_n = as_bj_naive(now or now_bj())
     for (account_id, subreddit), scores in groups.items():
         if not subreddit or len(scores) < min_samples:
             continue

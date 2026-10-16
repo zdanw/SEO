@@ -24,10 +24,20 @@ class SiteContext:
 
 
 def get_current_user(
+    x_auth_token: str | None = Header(default=None, alias="X-Auth-Token"),
     token: str | None = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    """从 Bearer Token 解析当前登录用户。"""
+    """从 X-Auth-Token 或 Bearer Token 解析当前登录用户。
+
+    优先读 X-Auth-Token：魔搭网关会拦截一切带 Authorization 头的请求
+    （平台级 403 Code=10010101007），因此部署在魔搭时前端改用自定义头
+    携带 JWT；本地直连仍兼容 Authorization: Bearer。
+    """
+    raw = (x_auth_token or token or "").strip()
+    if raw.lower().startswith("bearer "):
+        raw = raw[7:].strip()
+    token = raw or None
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

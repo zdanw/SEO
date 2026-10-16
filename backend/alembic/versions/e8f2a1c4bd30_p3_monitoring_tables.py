@@ -19,8 +19,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # 1. 启用 TimescaleDB 扩展（幂等）
-    op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
+    # 1. 启用 TimescaleDB 扩展（幂等）；数据库未提供该扩展时（如 Supabase PG17）跳过，
+    #    相关表退化为普通表，查询改用可移植的分桶表达式。
+    bind = op.get_bind()
+    has_timescale = bool(
+        bind.execute(
+            sa.text("SELECT 1 FROM pg_available_extensions WHERE name='timescaledb'")
+        ).scalar()
+    )
+    if has_timescale:
+        op.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
 
     # 2. 普通表：competitors
     op.create_table('competitors',
@@ -125,9 +133,10 @@ def upgrade() -> None:
     op.create_index('ix_competitor_rank_comp_kw_time', 'competitor_rank_snapshots',
                     ['competitor_id', 'keyword_id', sa.text('time DESC')], unique=False)
 
-    # 8. 转换为 hypertable（关键步骤）
-    op.execute("SELECT create_hypertable('serp_rank_snapshots', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => true)")
-    op.execute("SELECT create_hypertable('competitor_rank_snapshots', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => true)")
+    # 8. 转换为 hypertable（仅在有 TimescaleDB 时；否则保持普通表）
+    if has_timescale:
+        op.execute("SELECT create_hypertable('serp_rank_snapshots', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => true)")
+        op.execute("SELECT create_hypertable('competitor_rank_snapshots', 'time', chunk_time_interval => INTERVAL '7 days', if_not_exists => true)")
 
 
 def downgrade() -> None:
