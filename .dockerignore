@@ -1,0 +1,20 @@
+# 魔搭创空间构建上下文为仓库根目录（monorepo），只保留后端运行所需内容
+.git
+.github
+.trae
+frontend
+backend/tests
+backend/scripts
+backend/.pytest_cache
+backend/.env
+backend/celerybeat-schedule.*
+backend/Dockerfile
+backend/Dockerfile.api
+backend/ms_deploy.json
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+README*
+使用手册.md
+优化建议.md
