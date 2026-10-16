@@ -51,7 +51,7 @@ class TokenBucketConfig:
 # 各平台默认限流配置
 PLATFORM_LIMITS: dict[str, TokenBucketConfig] = {
     "serp": TokenBucketConfig(capacity=5, refill_rate=1.0),
-    "reddit": TokenBucketConfig(capacity=3, refill_rate=1/10),      # 10 秒 1 次
+    "reddit": TokenBucketConfig(capacity=1, refill_rate=1/10),      # 严格 10 秒 1 次；无突发容量（积压补发时防连发触发账号风控）
     "default": TokenBucketConfig(capacity=5, refill_rate=1.0),
 }
 

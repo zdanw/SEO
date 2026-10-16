@@ -113,8 +113,24 @@ alembic upgrade head
 
 # ---------- 5. Celery ----------
 log "启动 Celery worker / beat ..."
-celery -A app.core.celery_app worker -Q default,serp,social --loglevel=INFO --concurrency=2 &
-celery -A app.core.celery_app beat --loglevel=INFO &
+# 监督循环：worker/beat 一旦退出（崩溃/OOM/异常）5 秒后自动拉起。
+# 单容器部署没有外部进程管理器，裸 & 启动的子进程死亡后无人恢复——
+# 表现为排期照常生成、到期动作永远不执行（执行链路静默停摆）。
+# 输出不重定向，保持容器 stdout 可见（魔搭日志页）。
+(
+  while true; do
+    celery -A app.core.celery_app worker -Q default,serp,social --loglevel=INFO --concurrency=2
+    echo "[start] Celery worker exited, restarting in 5s ..."
+    sleep 5
+  done
+) &
+(
+  while true; do
+    celery -A app.core.celery_app beat --loglevel=INFO
+    echo "[start] Celery beat exited, restarting in 5s ..."
+    sleep 5
+  done
+) &
 
 # ---------- 6. FastAPI（前台，创空间要求 7860）----------
 log "启动 FastAPI，监听 0.0.0.0:7860 ..."

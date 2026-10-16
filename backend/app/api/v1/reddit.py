@@ -106,7 +106,7 @@ from app.services.reddit_mix import (
 )
 from app.services.reddit_persona import generate_persona_config, parse_persona
 from app.services import reddit_oauth
-from app.tasks.reddit_campaign_tasks import trigger_campaign_tick
+from app.tasks.reddit_campaign_tasks import maybe_trigger_tick_on_activity, trigger_campaign_tick
 from app.tasks.reddit_tasks import (
     publish_reddit_comment_by_id,
     publish_reddit_post_by_id,
@@ -2488,6 +2488,8 @@ def _validate_campaign_dates(start, end) -> None:
 def list_automation_campaigns(
     db: Session = Depends(get_db), ctx: SiteContext = Depends(get_site_context)
 ):
+    # beat 停摆兜底：调度心跳过期时借本次读取补触发一轮 tick（内部有锁防抖，零常态开销）
+    maybe_trigger_tick_on_activity()
     rows = (
         db.query(RedditCampaign)
         .filter(RedditCampaign.site_id == ctx.site.id)
@@ -2607,6 +2609,8 @@ def list_campaign_actions(
     ctx: SiteContext = Depends(get_site_context),
 ):
     _campaign_or_404(db, ctx, campaign_id)
+    # beat 停摆兜底：执行记录页是排查停摆的入口，顺手借流量补触发 tick
+    maybe_trigger_tick_on_activity()
     q = db.query(RedditCampaignAction).filter(RedditCampaignAction.campaign_id == campaign_id)
     if status:
         q = q.filter(RedditCampaignAction.status == status)

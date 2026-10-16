@@ -115,6 +115,39 @@ def trigger_campaign_tick() -> bool:
         return False
 
 
+_TICK_FALLBACK_LOCK = "trigger:reddit:campaign_tick_fallback"
+
+
+def maybe_trigger_tick_on_activity() -> None:
+    """beat 停摆兜底：读接口活动时若 tick 心跳已过期则补触发一轮 tick。
+
+    单容器部署（魔搭）下 beat 进程一旦死亡，15 分钟调度整体停摆且没有任何
+    自愈信号——心跳告警任务本身也是 beat 任务，会跟着一起停（自我掩蔽）。
+    这里借 API 流量作为最后防线：心跳过期说明调度已停，补触发一次 tick，
+    恢复排期与到期动作入队。心跳正常时只多一次 Redis GET，零额外开销；
+    任何失败静默，绝不影响接口主流程。
+    """
+    try:
+        from app.services.reddit_campaign import read_campaign_tick_heartbeat
+        from app.utils.rate_limiter import get_redis
+
+        if not read_campaign_tick_heartbeat().get("stale"):
+            return
+        r = get_redis()
+        # 独立 120s 锁：并发请求/多个接口同时命中只补触发一轮
+        if not r.set(_TICK_FALLBACK_LOCK, "1", nx=True, ex=120):
+            return
+        try:
+            campaign_tick.apply_async()
+            logger.warning(
+                "Campaign tick heartbeat stale, fallback tick triggered by API activity"
+            )
+        except Exception:
+            r.delete(_TICK_FALLBACK_LOCK)
+    except Exception:  # noqa: BLE001 — 兜底路径静默降级
+        logger.debug("fallback campaign tick trigger failed", exc_info=True)
+
+
 @celery_app.task(
     name="app.tasks.reddit_campaign_tasks.execute_campaign_action",
     bind=True,
