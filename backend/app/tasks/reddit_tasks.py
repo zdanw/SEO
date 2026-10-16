@@ -148,6 +148,7 @@ def _mark_comment_timeout(db: Session, comment_id: int) -> None:
 
 @celery_app.task(
     name="app.tasks.reddit_tasks.publish_reddit_post_by_id",
+    bind=True,
     soft_time_limit=_PUBLISH_SOFT_LIMIT,
     time_limit=_PUBLISH_HARD_LIMIT,
     max_retries=2,
@@ -206,6 +207,7 @@ def publish_reddit_post_by_id(self, post_id: int) -> dict:
 
 @celery_app.task(
     name="app.tasks.reddit_tasks.publish_reddit_comment_by_id",
+    bind=True,
     soft_time_limit=_PUBLISH_SOFT_LIMIT,
     time_limit=_PUBLISH_HARD_LIMIT,
     max_retries=2,
