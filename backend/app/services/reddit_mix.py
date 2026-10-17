@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import timedelta
 from app.core.timeutil import now_bj
 
 from sqlalchemy.orm import Session

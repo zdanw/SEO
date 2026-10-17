@@ -1,6 +1,7 @@
 """Reddit 自动化 Campaign 调度引擎单元测试。"""
 from __future__ import annotations
 
+import itertools
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,7 @@ from app.models.reddit import (
     RedditBrand,
     RedditCampaign,
     RedditCampaignAction,
+    RedditCampaignActionAttempt,
     RedditComment,
     RedditCommunity,
     RedditCommunityActivity,
@@ -38,6 +40,7 @@ _TABLES = [
     RedditCommunity.__table__,
     RedditCampaign.__table__,
     RedditCampaignAction.__table__,
+    RedditCampaignActionAttempt.__table__,
     RedditPost.__table__,
     RedditPostMetric.__table__,
     RedditComment.__table__,
@@ -112,6 +115,10 @@ def _campaign(db, site_id, **kwargs):
     return row
 
 
+# dedup_key 用自增序号：utcnow().microsecond 在 Windows 时钟粒度下会重复导致唯一约束误撞
+_dedup_seq = itertools.count()
+
+
 def _action(db, campaign, account, **kwargs):
     defaults = dict(
         campaign_id=campaign.id,
@@ -120,7 +127,7 @@ def _action(db, campaign, account, **kwargs):
         action_type="upvote_related",
         status="pending",
         planned_at=now_bj(),
-        dedup_key=f"upvote:{account.id}:t3_x{datetime.utcnow().microsecond}",
+        dedup_key=f"upvote:{account.id}:t3_x{next(_dedup_seq)}",
     )
     defaults.update(kwargs)
     row = RedditCampaignAction(**defaults)
@@ -331,9 +338,22 @@ def test_claim_action_is_atomic(db, site):
     campaign = _campaign(db, site.id)
     acc = _account(db, site.id, "a1")
     action = _action(db, campaign, acc)
-    assert rc.claim_action(db, action.id) is True
-    assert db.get(RedditCampaignAction, action.id).status == "executing"
-    assert rc.claim_action(db, action.id) is False  # 二次抢占失败
+    gen = rc.claim_action(db, action.id)
+    assert gen == 1  # 首次领取，执行代次递增到 1
+    claimed = db.get(RedditCampaignAction, action.id)
+    assert claimed.status == "executing"
+    assert claimed.lease_owner is not None
+    assert claimed.lease_until is not None
+    assert rc.claim_action(db, action.id) is None  # 二次抢占失败
+    # attempts 预写与领取同事务：有一条 request_pending 尝试记录
+    attempts = (
+        db.query(RedditCampaignActionAttempt)
+        .filter_by(action_id=action.id, phase="execution")
+        .all()
+    )
+    assert len(attempts) == 1
+    assert attempts[0].attempt_no == 1
+    assert attempts[0].request_state == "request_pending"
 
 
 def test_execute_action_votes_and_upserts_vote_log(db, site):
@@ -418,7 +438,7 @@ def test_execute_action_retries_exhausted_marks_failed(db, site):
     campaign = _campaign(db, site.id)
     acc = _account(db, site.id, "a1")
     _profile(db, site.id, acc.id)
-    action = _action(db, campaign, acc, target_thing_id="t3_r3")
+    action = _action(db, campaign, acc, target_thing_id="t3_r3", execution_max_attempts=1)
     client = MagicMock()
     client.vote.side_effect = rc.RedditApiError("still limited", status_code=429, retry_after=60)
     with patch.object(rc, "get_reddit_client_for_account", return_value=client):
@@ -427,6 +447,7 @@ def test_execute_action_retries_exhausted_marks_failed(db, site):
     refreshed = db.get(RedditCampaignAction, action.id)
     assert refreshed.status == "failed"
     assert "still limited" in refreshed.error_message
+    assert refreshed.result_status == "confirmed_absent"
 
 
 def test_execute_action_skips_risk_warning_account(db, site):
@@ -475,37 +496,39 @@ def test_reconcile_marks_done_failed_skipped(db, site):
 
 
 # ============ tick 主流程 ============
-def _patch_generation(title="T", body="b"):
-    return patch(
-        "app.services.reddit_content.generate_post_content",
-        return_value={"title": title, "body": body, "keyword": "", "site_url": None, "intent": "casual", "subreddit": "test"},
-    )
+def _patch_generation_enqueue():
+    """阶段 2：tick 只落骨架并投递 generation 队列；屏蔽真实 broker 入队。"""
+    return patch("app.services.reddit_campaign._try_enqueue_generation", return_value=True)
 
 
-def test_tick_generates_auto_post_with_schedule(db, site):
+def test_tick_plans_skeleton_post_without_content(db, site):
+    """阶段 2：tick 落骨架动作（queued），AI 生成出环，不产生内容行。"""
     acc = _account(db, site.id, "a1")
     _profile(db, site.id, acc.id)
     campaign = _campaign(db, site.id, daily_posts=1, content_mode="auto", account_ids=[acc.id])
-    with _patch_generation():
+    with _patch_generation_enqueue():
         summary = rc.run_campaign_tick(db)
     assert summary["posts"] == 1
-    post = db.query(RedditPost).filter_by(campaign_id=campaign.id).one()
-    assert post.status == "approved"
-    assert post.scheduled_at is not None
+    # 骨架动作：pending + generation queued，无内容行
     action = db.query(RedditCampaignAction).filter_by(campaign_id=campaign.id, action_type="post").one()
     assert action.status == "pending"
+    assert action.generation_status == "queued"
+    assert action.post_id is None
+    assert db.query(RedditPost).filter_by(campaign_id=campaign.id).count() == 0
     assert campaign.last_tick_at is not None
 
 
-def test_tick_review_mode_goes_to_pending_review(db, site):
+def test_tick_review_mode_also_plans_skeleton(db, site):
+    """review 模式：tick 同样只落骨架（内容待审状态由生成完成时决定）。"""
     acc = _account(db, site.id, "a1")
     _profile(db, site.id, acc.id)
     campaign = _campaign(db, site.id, daily_posts=1, content_mode="review", account_ids=[acc.id])
-    with _patch_generation():
+    with _patch_generation_enqueue():
         rc.run_campaign_tick(db)
-    post = db.query(RedditPost).filter_by(campaign_id=campaign.id).one()
-    assert post.status == "pending_review"
-    assert post.scheduled_at is None
+    action = db.query(RedditCampaignAction).filter_by(campaign_id=campaign.id, action_type="post").one()
+    assert action.status == "pending"
+    assert action.generation_status == "queued"
+    assert db.query(RedditPost).filter_by(campaign_id=campaign.id).count() == 0
 
 
 def test_tick_respects_daily_quota(db, site):
@@ -514,7 +537,7 @@ def test_tick_respects_daily_quota(db, site):
     campaign = _campaign(db, site.id, daily_posts=1, content_mode="auto", account_ids=[acc.id])
     acc2 = _account(db, site.id, "a2")
     _action(db, campaign, acc2, action_type="post", status="pending", dedup_key="post:9:9:d")
-    with _patch_generation():
+    with _patch_generation_enqueue():
         summary = rc.run_campaign_tick(db)
     assert summary["posts"] == 0  # 当日配额已满，不再生成
     assert db.query(RedditPost).filter_by(campaign_id=campaign.id).count() == 0
@@ -528,7 +551,7 @@ def test_tick_ignores_out_of_range_campaign(db, site):
         db, site.id, daily_posts=1, content_mode="auto", account_ids=[acc.id],
         start_date=today + timedelta(days=5), end_date=today + timedelta(days=6),
     )
-    with _patch_generation():
+    with _patch_generation_enqueue():
         summary = rc.run_campaign_tick(db)
     assert summary["campaigns"] == 0
     assert summary["posts"] == 0
@@ -559,7 +582,7 @@ def test_tick_plans_into_free_slot_before_tail_action(db, site):
     )
     # 同账号已有 pending 动作占住窗口尾（16:50）→ 空档为 [14:00, 16:25]
     _action(db, campaign, acc, planned_at=datetime(2026, 10, 9, 16, 50), dedup_key="u_tail")
-    with _patch_generation():
+    with _patch_generation_enqueue():
         stats = rc._tick_campaign(db, campaign, datetime(2026, 10, 9, 14, 0))
     assert stats["posts"] == 1
     post_action = (
@@ -600,7 +623,7 @@ def test_each_day_gets_fresh_quota_round(db, site):
         db, campaign, acc, action_type="post", status="done",
         planned_at=now - timedelta(days=1), dedup_key="post:yesterday",
     )
-    with _patch_generation():
+    with _patch_generation_enqueue():
         stats = rc._tick_campaign(db, campaign, now)
     assert stats["posts"] == 1
     action = (
@@ -673,7 +696,7 @@ def test_run_campaign_tick_auto_ends_expired(db, site):
         db, site.id, daily_posts=1, content_mode="auto", account_ids=[acc.id],
         start_date=today - timedelta(days=3), end_date=today - timedelta(days=2),
     )
-    with _patch_generation():
+    with _patch_generation_enqueue():
         summary = rc.run_campaign_tick(db)
     assert summary["campaigns"] == 0
     assert summary["posts"] == 0
@@ -700,6 +723,13 @@ def test_publish_scan_skips_paused_campaign_content(db, site, monkeypatch):
     p_paused = _post(paused.id, "t2")
     p_normal = _post(None, "t3")
     db.add_all([p_run, p_paused, p_normal])
+    db.flush()
+    # 阶段 2 门控：campaign 内容必须有 generation ready 的骨架动作才可发放
+    db.add(RedditCampaignAction(
+        campaign_id=running.id, site_id=site.id, account_id=acc.id,
+        action_type="post", status="pending", planned_at=now,
+        dedup_key="post:run", post_id=p_run.id, generation_status="ready",
+    ))
     db.commit()
     run_id, normal_id, paused_id = p_run.id, p_normal.id, p_paused.id
 

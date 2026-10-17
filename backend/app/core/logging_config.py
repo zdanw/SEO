@@ -21,7 +21,21 @@ from starlette.responses import Response
 request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 user_id_var: ContextVar[str] = ContextVar("user_id", default="-")
 
-_EXTRA_KEYS = ("method", "path", "status", "duration_ms", "client")
+_EXTRA_KEYS = (
+    "method",
+    "path",
+    "status",
+    "duration_ms",
+    "client",
+    # 阶段 0 观测埋点：campaign 调度 / AI 生成结构化指标字段（extra 传入才输出）
+    "event",  # ai_call / ai_pipeline / tick_complete / tick_overlap / campaign_planned / queue_depth
+    "site_id",
+    "campaign_id",
+    "account_id",
+    "action_id",
+    "elapsed_ms",
+    "detail",  # dict：自由维度（rewrite_count、队列深度、成功率等），JSON 序列化输出
+)
 
 
 class RequestContextFilter(logging.Filter):

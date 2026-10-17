@@ -38,8 +38,18 @@ celery_app.conf.update(
     task_soft_time_limit=55 * 60,
     worker_prefetch_multiplier=1,
     task_default_queue="default",
+    # 队列拓扑（阶段 2）：default(tick) / generation(AI 生成) / social(执行) /
+    # serp(发现) / maintenance(回收对账)。精确任务名在前，通配兜底在后。
     task_routes={
         "app.tasks.serp_*": {"queue": "serp"},
+        "app.tasks.reddit_campaign_tasks.campaign_tick": {"queue": "default"},
+        "app.tasks.reddit_campaign_tasks.generate_campaign_content": {"queue": "generation"},
+        "app.tasks.reddit_campaign_tasks.refresh_campaign_comment_candidates": {"queue": "serp"},
+        "app.tasks.reddit_tasks.recover_stale_reddit_posting": {"queue": "maintenance"},
+        "app.tasks.reddit_tasks.sync_reddit_post_metrics": {"queue": "maintenance"},
+        "app.tasks.reddit_campaign_tasks.expand_communities": {"queue": "maintenance"},
+        "app.tasks.reddit_campaign_tasks.community_feedback_calibration": {"queue": "maintenance"},
+        "app.tasks.reddit_campaign_tasks.cleanup_campaign_data": {"queue": "maintenance"},
         "app.tasks.reddit_*": {"queue": "social"},
     },
     beat_schedule={
@@ -77,6 +87,11 @@ celery_app.conf.update(
         "reddit-community-feedback-calibration": {
             "task": "app.tasks.reddit_campaign_tasks.community_feedback_calibration",
             "schedule": crontab(hour=4, minute=37),
+        },
+        # Reddit：每日数据保留清理（终态动作 12 个月 / 尝试审计 6 个月，配置可调）
+        "reddit-campaign-data-cleanup": {
+            "task": "app.tasks.reddit_campaign_tasks.cleanup_campaign_data",
+            "schedule": crontab(hour=5, minute=7),
         },
         # 已移除的固定调度（按需可手动/API 触发，任务本身仍注册）：
         # SERP 全量抓取、代理健康检测、SERP 失败率告警、账号健康检查、智能发现讨论

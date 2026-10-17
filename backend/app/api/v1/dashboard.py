@@ -1,7 +1,7 @@
 """数据大屏 API：汇总卡片、排名趋势。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from app.core.timeutil import now_bj
 
 from fastapi import APIRouter, Depends, Query

@@ -9,8 +9,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -26,6 +28,9 @@ from app.services.seo_analyzer import (
     TITLE_MAX,
     _strip_markdown,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============ 异常 ============
@@ -501,17 +506,39 @@ class DeepSeekClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        started = time.perf_counter()
+        outcome = "ok"
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 resp = client.post(url, headers=headers, json=payload)
             if resp.status_code >= 400:
+                outcome = f"http_{resp.status_code}"
                 raise DeepSeekError(
                     f"{self.provider} API 返回 {resp.status_code}: {resp.text[:500]}"
                 )
             data = resp.json()
             return data["choices"][0]["message"]["content"]
-        except httpx.HTTPError as e:
+        except httpx.TimeoutException as e:
+            # TimeoutException 是 HTTPError 子类，必须先捕获以区分超时与一般网络错误
+            outcome = "timeout"
             raise DeepSeekError(f"网络请求失败: {e}") from e
+        except httpx.HTTPError as e:
+            outcome = "network_error"
+            raise DeepSeekError(f"网络请求失败: {e}") from e
+        finally:
+            # 阶段 0 埋点：单次 AI 调用耗时 / 结果分类（ok / timeout / network_error / http_4xx）
+            elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+            logger.info(
+                "ai call %s -> %s (%.1fms)",
+                self.provider,
+                outcome,
+                elapsed_ms,
+                extra={
+                    "event": "ai_call",
+                    "elapsed_ms": elapsed_ms,
+                    "detail": {"provider": self.provider, "model": self.model, "outcome": outcome},
+                },
+            )
 
     # ---------- 业务方法 ----------
     def generate_article(

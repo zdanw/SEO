@@ -135,9 +135,40 @@
           <el-option v-for="(label, key) in ACTION_TYPES" :key="key" :label="label" :value="key" />
         </el-select>
         <el-button size="small" :icon="Refresh" @click="loadActions">刷新</el-button>
+        <el-button size="small" :loading="statsLoading" @click="loadAttemptStats">尝试统计</el-button>
         <span v-if="actions.length >= 200" class="hint">最多显示最近 200 条，可用筛选缩小范围</span>
       </div>
-      <el-table v-loading="actionsLoading" :data="actions" size="small" stripe>
+      <el-table v-loading="actionsLoading" :data="actions" size="small" stripe @expand-change="onExpandAction">
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="attempts-panel" v-loading="attemptsLoadingId === row.id">
+              <el-table v-if="attemptsCache[row.id]?.length" :data="attemptsCache[row.id]" size="small" border>
+                <el-table-column label="阶段" width="70">
+                  <template #default="{ row: a }">{{ PHASE_TEXT[a.phase as string] || a.phase }}</template>
+                </el-table-column>
+                <el-table-column label="#" prop="attempt_no" width="50" />
+                <el-table-column label="状态" width="110">
+                  <template #default="{ row: a }">{{ REQUEST_STATE_TEXT[a.request_state as string] || a.request_state }}</template>
+                </el-table-column>
+                <el-table-column label="Worker" prop="worker_id" width="150" show-overflow-tooltip />
+                <el-table-column label="请求开始" width="160">
+                  <template #default="{ row: a }">{{ fmtTime(a.request_started_at) }}</template>
+                </el-table-column>
+                <el-table-column label="响应回写" width="160">
+                  <template #default="{ row: a }">{{ fmtTime(a.responded_at) }}</template>
+                </el-table-column>
+                <el-table-column label="错误" min-width="200">
+                  <template #default="{ row: a }">
+                    <span v-if="a.error_code" class="err">{{ a.error_code }}: {{ a.error_message }}</span>
+                    <span v-else class="muted">—</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="外部对象" prop="external_object_id" width="140" show-overflow-tooltip />
+              </el-table>
+              <div v-else class="hint" style="padding: 8px">暂无尝试记录（未领取或由重投前的骨架状态）</div>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="类型" width="110">
           <template #default="{ row }">{{ ACTION_TYPES[row.action_type as CampaignActionType] || row.action_type }}</template>
         </el-table-column>
@@ -166,12 +197,48 @@
         </el-table-column>
         <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
-            <el-button v-if="row.status === 'failed'" size="small" type="primary" link @click="retry(row)">重试</el-button>
+            <el-button v-if="row.status === 'failed' || row.status === 'needs_review'" size="small" type="primary" link @click="retry(row)">重试</el-button>
           </template>
         </el-table-column>
         <template #empty>暂无执行记录，启动后由调度引擎生成</template>
       </el-table>
     </el-drawer>
+
+    <!-- 尝试统计（阶段 3）：重试是否改善成功率 + 哪个 worker 高故障 -->
+    <el-dialog v-model="statsVisible" :title="`尝试统计 - ${activeCampaign?.name || ''}`" width="640px">
+      <template v-if="attemptStats">
+        <h4 class="stats-title">成功率（按尝试序号）</h4>
+        <el-table :data="attemptStats.breakdown" size="small" border>
+          <el-table-column label="阶段" width="80">
+            <template #default="{ row }">{{ PHASE_TEXT[row.phase as string] || row.phase }}</template>
+          </el-table-column>
+          <el-table-column label="尝试序号" prop="attempt_no" width="90" />
+          <el-table-column label="总数" prop="total" width="80" />
+          <el-table-column label="成功" prop="succeeded" width="80" />
+          <el-table-column label="出错" prop="errored" width="80" />
+          <el-table-column label="成功率">
+            <template #default="{ row }">{{ row.total ? Math.round((row.succeeded / row.total) * 100) : 0 }}%</template>
+          </el-table-column>
+        </el-table>
+        <h4 class="stats-title">Worker 故障分布</h4>
+        <el-table :data="attemptStats.worker_stats" size="small" border>
+          <el-table-column label="阶段" width="80">
+            <template #default="{ row }">{{ PHASE_TEXT[row.phase as string] || row.phase }}</template>
+          </el-table-column>
+          <el-table-column label="Worker" min-width="180" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.worker_id || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="总数" prop="total" width="80" />
+          <el-table-column label="出错" prop="errored" width="80" />
+          <el-table-column label="错误率">
+            <template #default="{ row }">{{ row.total ? Math.round((row.errored / row.total) * 100) : 0 }}%</template>
+          </el-table-column>
+        </el-table>
+        <div v-if="!attemptStats.breakdown.length && !attemptStats.worker_stats.length" class="hint">
+          暂无尝试数据：动作尚未经过生成/执行阶段
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -182,13 +249,17 @@ import { Plus, QuestionFilled, Refresh } from '@element-plus/icons-vue'
 import {
   type RedditCampaign,
   type RedditCampaignAction,
+  type RedditActionAttempt,
+  type RedditAttemptStats,
   type CampaignActionStatus,
   type CampaignActionType,
   type CampaignStatus,
   type RedditCampaignPayload,
   createCampaign,
   deleteCampaign,
+  getCampaignAttemptStats,
   listAccountProfiles,
+  listActionAttempts,
   listCampaignActions,
   listCampaigns,
   listProducts,
@@ -212,6 +283,8 @@ const ACTION_STATUS: Record<CampaignActionStatus, string> = {
   done: '完成',
   failed: '失败',
   skipped: '跳过',
+  reconciling: '对账中',
+  needs_review: '需人工核实',
 }
 const ACTION_STATUS_TAG: Record<CampaignActionStatus, string> = {
   pending: 'info',
@@ -219,6 +292,8 @@ const ACTION_STATUS_TAG: Record<CampaignActionStatus, string> = {
   done: 'success',
   failed: 'danger',
   skipped: 'info',
+  reconciling: 'warning',
+  needs_review: 'danger',
 }
 const STATUS_TEXT: Record<CampaignStatus, string> = {
   draft: '草稿',
@@ -265,6 +340,12 @@ const actionsLoading = ref(false)
 const actions = ref<RedditCampaignAction[]>([])
 const activeCampaign = ref<RedditCampaign | null>(null)
 const actionFilter = reactive<{ status?: string; action_type?: string }>({})
+// 尝试审计（阶段 3）：展开行懒加载 + campaign 级统计对话框
+const attemptsCache = ref<Record<number, RedditActionAttempt[]>>({})
+const attemptsLoadingId = ref<number | null>(null)
+const statsVisible = ref(false)
+const statsLoading = ref(false)
+const attemptStats = ref<RedditAttemptStats | null>(null)
 
 function normSub(s: string) {
   return s.replace(/^\/?r\//i, '').trim()
@@ -442,6 +523,7 @@ async function remove(row: RedditCampaign) {
 async function loadActions() {
   if (!activeCampaign.value) return
   actionsLoading.value = true
+  attemptsCache.value = {}
   try {
     actions.value = await listCampaignActions(activeCampaign.value.id, {
       status: actionFilter.status,
@@ -453,6 +535,41 @@ async function loadActions() {
   } finally {
     actionsLoading.value = false
   }
+}
+
+async function loadAttempts(row: RedditCampaignAction) {
+  if (attemptsCache.value[row.id]) return
+  attemptsLoadingId.value = row.id
+  try {
+    attemptsCache.value[row.id] = await listActionAttempts(row.id)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '加载尝试记录失败')
+  } finally {
+    attemptsLoadingId.value = null
+  }
+}
+
+async function loadAttemptStats() {
+  if (!activeCampaign.value) return
+  statsLoading.value = true
+  try {
+    attemptStats.value = await getCampaignAttemptStats(activeCampaign.value.id)
+    statsVisible.value = true
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '加载尝试统计失败')
+  } finally {
+    statsLoading.value = false
+  }
+}
+
+function onExpandAction(row: RedditCampaignAction, expandedRows: RedditCampaignAction[]) {
+  if (expandedRows.some((r) => r.id === row.id)) loadAttempts(row)
+}
+
+const PHASE_TEXT: Record<string, string> = { generation: '生成', execution: '执行' }
+const REQUEST_STATE_TEXT: Record<string, string> = {
+  request_pending: '请求未回写',
+  responded: '已回写',
 }
 
 function openActions(row: RedditCampaign) {
@@ -494,6 +611,12 @@ onMounted(() => {
 .hint {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+}
+.attempts-panel {
+  padding: 4px 12px;
+}
+.stats-title {
+  margin: 8px 0 6px;
 }
 .ops {
   display: flex;

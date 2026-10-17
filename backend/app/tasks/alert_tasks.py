@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from app.core.timeutil import now_bj
 
 from sqlalchemy import func

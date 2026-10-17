@@ -189,7 +189,10 @@ class RedditScheduleIn(BaseModel):
 CampaignStatus = Literal["draft", "running", "paused", "ended"]
 CampaignMode = Literal["auto", "review"]
 CampaignActionType = Literal["post", "comment", "upvote_related", "upvote_self"]
-CampaignActionStatus = Literal["pending", "executing", "done", "failed", "skipped"]
+# reconciling = 外部结果待核实；needs_review = 自动恢复不安全，转人工
+CampaignActionStatus = Literal[
+    "pending", "executing", "done", "failed", "skipped", "reconciling", "needs_review"
+]
 
 
 class RedditCampaignCreate(BaseModel):
@@ -251,6 +254,7 @@ class RedditCampaignOut(BaseModel):
     today_posts: int = 0
     today_comments: int = 0
     today_upvotes: int = 0
+    config_version: int = 1
     last_tick_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
@@ -272,6 +276,11 @@ class RedditCampaignActionOut(BaseModel):
     target_post_url: Optional[str] = None
     error_message: Optional[str] = None
     skip_reason: Optional[str] = None
+    # 阶段 1 可靠性字段（诊断展示）
+    config_version: Optional[int] = None
+    result_status: Optional[str] = None
+    last_error_code: Optional[str] = None
+    available_at: Optional[datetime] = None
     account_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
@@ -292,6 +301,50 @@ class RedditBatchRetryOut(BaseModel):
     retried: int
     skipped: int
     items: list[RedditBatchRetryItem] = Field(default_factory=list)
+
+
+class RedditActionAttemptOut(BaseModel):
+    """单条动作的尝试审计明细（阶段 3 展示）。"""
+
+    id: int
+    action_id: int
+    phase: str
+    attempt_no: int
+    request_state: str
+    worker_id: Optional[str] = None
+    request_started_at: Optional[datetime] = None
+    responded_at: Optional[datetime] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    external_object_id: Optional[str] = None
+    result_summary: Optional[dict] = None
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RedditAttemptBreakdown(BaseModel):
+    """按阶段 × 尝试序号聚合：回答「重试是否改善成功率」。"""
+
+    phase: str
+    attempt_no: int
+    total: int = 0
+    succeeded: int = 0
+    errored: int = 0
+
+
+class RedditAttemptWorkerStat(BaseModel):
+    """按阶段 × worker 聚合：回答「哪个 worker 高故障」。"""
+
+    phase: str
+    worker_id: Optional[str] = None
+    total: int = 0
+    errored: int = 0
+
+
+class RedditAttemptStatsOut(BaseModel):
+    campaign_id: int
+    breakdown: list[RedditAttemptBreakdown] = Field(default_factory=list)
+    worker_stats: list[RedditAttemptWorkerStat] = Field(default_factory=list)
 
 
 class RedditCampaignReportOut(BaseModel):
@@ -535,12 +588,6 @@ class RedditMetricOut(BaseModel):
     upvote_ratio: Optional[float] = None
     synced_at: datetime
     model_config = ConfigDict(from_attributes=True)
-
-
-class RedditRiskOut(BaseModel):
-    ok: bool
-    errors: list[str] = []
-    warnings: list[str] = []
 
 
 class RedditOverviewOut(BaseModel):

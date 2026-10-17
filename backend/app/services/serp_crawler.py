@@ -1,4 +1,4 @@
-"""Google SERP 爬虫服务（实现 SERPProvider 契约）。
+﻿"""Google SERP 爬虫服务（实现 SERPProvider 契约）。
 
 模式（合规优先）：
 1. ScrapingBee（SCRAPINGBEE_API_KEY）
@@ -15,7 +15,6 @@ import logging
 import random
 import re
 import time
-from datetime import datetime
 from typing import Optional
 
 import httpx
@@ -23,7 +22,6 @@ import httpx
 from app.core.config import settings
 from app.core.timeutil import now_bj
 from app.services.serp_provider import (
-    SERPProvider,
     SerpFetchResult,
     SerpQuery,
     normalize_fetch_result,
@@ -492,14 +490,3 @@ def get_serp_crawler() -> SerpCrawler:
     if _crawler_singleton is None:
         _crawler_singleton = SerpCrawler()
     return _crawler_singleton
-
-
-def get_serp_provider() -> SERPProvider:
-    """业务侧统一取 Provider，便于日后替换实现。"""
-    return get_serp_crawler()
-
-
-def reset_serp_crawler() -> None:
-    """测试用：清空单例以便切换配置。"""
-    global _crawler_singleton
-    _crawler_singleton = None

@@ -4,7 +4,7 @@ from sqlalchemy import text
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import SiteContext, get_current_user, get_site_context, require_site_write
+from app.api.deps import SiteContext, get_current_user, require_site_write
 from app.core.database import get_db
 from app.models.client_site import ClientSite
 from app.models.site_member import SiteMember

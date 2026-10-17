@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import difflib
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 from app.core.timeutil import now_bj
 
 from sqlalchemy.orm import Session
@@ -81,15 +81,6 @@ def get_or_create_profile(db: Session, site_id: int, account_id: int) -> RedditA
     db.commit()
     db.refresh(profile)
     return profile
-
-
-def get_profiles_for_site(db: Session, site_id: int) -> list[RedditAccountProfile]:
-    return (
-        db.query(RedditAccountProfile)
-        .filter(RedditAccountProfile.site_id == site_id)
-        .order_by(RedditAccountProfile.id.asc())
-        .all()
-    )
 
 
 def apply_role_defaults(profile: RedditAccountProfile) -> None:

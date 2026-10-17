@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional, Literal
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict
 
 CrawlStatus = Literal["success", "not_found", "blocked", "timeout", "error"]
 
@@ -31,60 +31,3 @@ class LatestRankOut(BaseModel):
     crawl_status: str
     last_crawled: Optional[str] = None
 
-
-
-
-# ============ Backlink ============
-class BacklinkBase(BaseModel):
-    target_url: str = Field(min_length=1, max_length=500)
-    source_url: str = Field(min_length=1, max_length=500)
-    anchor_text: Optional[str] = Field(default=None, max_length=300)
-    domain_authority: Optional[int] = Field(default=None, ge=0, le=100)
-
-
-class BacklinkCreate(BacklinkBase):
-    pass
-
-
-class BacklinkUpdate(BaseModel):
-    anchor_text: Optional[str] = None
-    domain_authority: Optional[int] = None
-    is_alive: Optional[bool] = None
-
-
-class BacklinkOut(BacklinkBase):
-    id: int
-    user_id: int
-    is_alive: bool
-    first_seen_at: datetime
-    last_checked_at: Optional[datetime] = None
-    lost_at: Optional[datetime] = None
-    model_config = ConfigDict(from_attributes=True)
-
-
-# ============ Competitor ============
-class CompetitorBase(BaseModel):
-    domain: str = Field(min_length=1, max_length=200)
-    name: Optional[str] = Field(default=None, max_length=100)
-
-
-class CompetitorCreate(CompetitorBase):
-    pass
-
-
-class CompetitorOut(CompetitorBase):
-    id: int
-    user_id: int
-    created_at: datetime
-    model_config = ConfigDict(from_attributes=True)
-
-
-class CompetitorRankOut(BaseModel):
-    time: datetime
-    competitor_id: int
-    keyword_id: int
-    domain: str
-    rank: Optional[int] = None
-    target_url: Optional[str] = None
-    keyword: Optional[str] = None  # 冗余展示字段
-    model_config = ConfigDict(from_attributes=True)

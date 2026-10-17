@@ -538,7 +538,14 @@ export function upvoteRedditThing(payload: {
 export type CampaignStatus = 'draft' | 'running' | 'paused' | 'ended'
 export type CampaignMode = 'auto' | 'review'
 export type CampaignActionType = 'post' | 'comment' | 'upvote_related' | 'upvote_self'
-export type CampaignActionStatus = 'pending' | 'executing' | 'done' | 'failed' | 'skipped'
+export type CampaignActionStatus =
+  | 'pending'
+  | 'executing'
+  | 'done'
+  | 'failed'
+  | 'skipped'
+  | 'reconciling'
+  | 'needs_review'
 
 export interface RedditCampaign {
   id: number
@@ -585,6 +592,43 @@ export interface RedditCampaignAction {
   account_name?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface RedditActionAttempt {
+  id: number
+  action_id: number
+  phase: 'generation' | 'execution'
+  attempt_no: number
+  request_state: 'request_pending' | 'responded'
+  worker_id?: string | null
+  request_started_at?: string | null
+  responded_at?: string | null
+  error_code?: string | null
+  error_message?: string | null
+  external_object_id?: string | null
+  result_summary?: Record<string, unknown> | null
+  created_at: string
+}
+
+export interface RedditAttemptBreakdown {
+  phase: string
+  attempt_no: number
+  total: number
+  succeeded: number
+  errored: number
+}
+
+export interface RedditAttemptWorkerStat {
+  phase: string
+  worker_id?: string | null
+  total: number
+  errored: number
+}
+
+export interface RedditAttemptStats {
+  campaign_id: number
+  breakdown: RedditAttemptBreakdown[]
+  worker_stats: RedditAttemptWorkerStat[]
 }
 
 export interface RedditCampaignPayload {
@@ -635,4 +679,12 @@ export function listCampaignActions(id: number, params?: { status?: string; acti
 
 export function retryCampaignAction(actionId: number) {
   return http.post<any, RedditCampaignAction>(`/reddit/automation/actions/${actionId}/retry`, {})
+}
+
+export function listActionAttempts(actionId: number) {
+  return http.get<any, RedditActionAttempt[]>(`/reddit/automation/actions/${actionId}/attempts`)
+}
+
+export function getCampaignAttemptStats(campaignId: number) {
+  return http.get<any, RedditAttemptStats>(`/reddit/automation/campaigns/${campaignId}/attempt-stats`)
 }

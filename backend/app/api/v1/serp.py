@@ -1,7 +1,7 @@
 """SERP 排名查询 API。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from app.core.timeutil import now_bj
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request

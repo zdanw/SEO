@@ -9,7 +9,7 @@ from app.core.timeutil import as_bj_naive, now_bj
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, or_
+from sqlalchemy import case, func, or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
@@ -20,6 +20,7 @@ from app.models.reddit import (
     RedditBrand,
     RedditCampaign,
     RedditCampaignAction,
+    RedditCampaignActionAttempt,
     RedditComment,
     RedditCommunity,
     RedditPost,
@@ -36,6 +37,10 @@ from app.schemas.reddit import (
     RedditBatchRetryIn,
     RedditBatchRetryItem,
     RedditBatchRetryOut,
+    RedditActionAttemptOut,
+    RedditAttemptBreakdown,
+    RedditAttemptStatsOut,
+    RedditAttemptWorkerStat,
     RedditBrandIn,
     RedditBrandOut,
     RedditBrandUpdate,
@@ -2549,6 +2554,10 @@ def update_automation_campaign(
     for key, value in data.items():
         setattr(campaign, key, value)
     _validate_campaign_dates(campaign.start_date, campaign.end_date)
+    if data:
+        # 阶段 1 config_version 递增逻辑：任何配置修改都使存量动作的快照版本过期，
+        # 执行前校验会记录 mismatch 观测（影响分级与重校验在阶段 3 完整实现）
+        campaign.config_version = (campaign.config_version or 1) + 1
     db.commit()
     db.refresh(campaign)
     return _campaign_out(db, campaign)
@@ -2594,6 +2603,20 @@ def pause_automation_campaign(
     if campaign.status != "running":
         raise HTTPException(status_code=400, detail="仅运行中的 Campaign 可暂停")
     campaign.status = "paused"
+    # 暂停协议（阶段 1）：在途动作打取消请求时刻。已领取未发出的动作在执行前
+    # 校验点停止；已发出的请求不可撤回，记为在途走对账，不得伪装终态。
+    db.execute(
+        text(
+            """
+            UPDATE reddit_campaign_actions
+            SET cancel_requested_at = :now
+            WHERE campaign_id = :cid
+              AND status IN ('pending', 'executing')
+              AND cancel_requested_at IS NULL
+            """
+        ),
+        {"now": now_bj(), "cid": campaign.id},
+    )
     db.commit()
     db.refresh(campaign)
     return _campaign_out(db, campaign)
@@ -2631,6 +2654,105 @@ def list_campaign_actions(
     return out
 
 
+@router.get("/automation/actions/{action_id}/attempts", response_model=list[RedditActionAttemptOut])
+def list_action_attempts(
+    action_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(get_site_context),
+):
+    """单条动作的尝试审计明细（阶段 3）：两段持久化的请求/响应记录，用于诊断。"""
+    action = db.get(RedditCampaignAction, action_id)
+    if action is None:
+        raise HTTPException(status_code=404, detail="动作记录不存在")
+    campaign = db.get(RedditCampaign, action.campaign_id)
+    if campaign is None or campaign.site_id != ctx.site.id:
+        raise HTTPException(status_code=404, detail="动作记录不存在")
+    return (
+        db.query(RedditCampaignActionAttempt)
+        .filter(RedditCampaignActionAttempt.action_id == action_id)
+        .order_by(
+            RedditCampaignActionAttempt.phase,
+            RedditCampaignActionAttempt.attempt_no,
+        )
+        .all()
+    )
+
+
+@router.get("/automation/campaigns/{campaign_id}/attempt-stats", response_model=RedditAttemptStatsOut)
+def campaign_attempt_stats(
+    campaign_id: int,
+    db: Session = Depends(get_db),
+    ctx: SiteContext = Depends(get_site_context),
+):
+    """尝试审计聚合（阶段 3）：重试是否改善成功率（按 attempt_no 分桶）+ 哪个 worker 高故障。"""
+    _campaign_or_404(db, ctx, campaign_id)
+    base = (
+        db.query(
+            RedditCampaignActionAttempt.phase,
+            RedditCampaignActionAttempt.attempt_no,
+            func.count().label("total"),
+            func.sum(
+                case(
+                    (RedditCampaignActionAttempt.error_code.is_(None), 1),
+                    else_=0,
+                )
+            ).label("succeeded"),
+            func.sum(
+                case(
+                    (RedditCampaignActionAttempt.error_code.isnot(None), 1),
+                    else_=0,
+                )
+            ).label("errored"),
+        )
+        .join(RedditCampaignAction, RedditCampaignAction.id == RedditCampaignActionAttempt.action_id)
+        .filter(RedditCampaignAction.campaign_id == campaign_id)
+        .group_by(
+            RedditCampaignActionAttempt.phase,
+            RedditCampaignActionAttempt.attempt_no,
+        )
+        .order_by(
+            RedditCampaignActionAttempt.phase,
+            RedditCampaignActionAttempt.attempt_no,
+        )
+        .all()
+    )
+    workers = (
+        db.query(
+            RedditCampaignActionAttempt.phase,
+            RedditCampaignActionAttempt.worker_id,
+            func.count().label("total"),
+            func.sum(
+                case(
+                    (RedditCampaignActionAttempt.error_code.isnot(None), 1),
+                    else_=0,
+                )
+            ).label("errored"),
+        )
+        .join(RedditCampaignAction, RedditCampaignAction.id == RedditCampaignActionAttempt.action_id)
+        .filter(RedditCampaignAction.campaign_id == campaign_id)
+        .group_by(
+            RedditCampaignActionAttempt.phase,
+            RedditCampaignActionAttempt.worker_id,
+        )
+        .order_by(func.count().desc())
+        .limit(20)
+        .all()
+    )
+    return RedditAttemptStatsOut(
+        campaign_id=campaign_id,
+        breakdown=[
+            RedditAttemptBreakdown(
+                phase=phase, attempt_no=no, total=total, succeeded=succeeded or 0, errored=errored or 0
+            )
+            for phase, no, total, succeeded, errored in base
+        ],
+        worker_stats=[
+            RedditAttemptWorkerStat(phase=phase, worker_id=worker_id, total=total, errored=errored or 0)
+            for phase, worker_id, total, errored in workers
+        ],
+    )
+
+
 def _retry_one_action(db: Session, ctx: SiteContext, action_id: int) -> tuple[bool, str | None]:
     """重试单条失败动作（单条/批量共用）：返回 (ok, 失败原因)。
 
@@ -2650,15 +2772,24 @@ def _retry_one_action(db: Session, ctx: SiteContext, action_id: int) -> tuple[bo
     )
     if not campaign:
         return False, "动作记录不存在"
-    if action.status != "failed":
-        return False, "仅失败的动作可重试"
+    if action.status not in ("failed", "needs_review"):
+        return False, "仅失败或需人工处理（needs_review）的动作可重试"
 
+    was_review = action.status == "needs_review"
     now = now_bj()
+    # 状态迁移守卫语义：释放旧租约字段，代次保持单调（fencing 依据），审计字段留痕
     action.status = "pending"
     action.error_message = None
+    action.lease_owner = None
+    action.lease_until = None
+    action.available_at = now
+    action.result_status = None
+    action.cancel_requested_at = None
+    action.planned_at = now
+    if was_review:
+        action.last_error_code = "review_retry"
 
     if action.action_type in ("upvote_related", "upvote_self"):
-        action.planned_at = now
         db.commit()
         db.refresh(action)
         trigger_campaign_tick()

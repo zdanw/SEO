@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session, object_session
 from sqlalchemy.orm.exc import UnmappedInstanceError
 
-from app.services.zernio_client import ZernioError, get_zernio_client, is_zernio_configured
+from app.services.zernio_client import ZernioError, get_zernio_client
 
 _REDDIT_POST_RE = re.compile(
     r"reddit\.com/r/(?P<subreddit>[^/]+)/comments/(?P<post_id>[a-z0-9]+)",
@@ -66,11 +66,6 @@ def parse_reddit_post_url(url: str) -> tuple[str, str]:
     if not m:
         raise ValueError(f"Invalid Reddit post URL: {url}")
     return f"t3_{m.group('post_id')}", m.group("subreddit")
-
-
-def is_reddit_configured() -> bool:
-    """True when Zernio API key is set (direct Reddit OAuth is no longer used)."""
-    return is_zernio_configured()
 
 
 def normalize_subreddit(name: str) -> str:

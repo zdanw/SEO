@@ -191,6 +191,26 @@ def generate_comment_pipeline(
         elif risk != "brand_leak":
             risk = "likely_ai"
 
+    # 阶段 0 埋点：AI 流水线整趟指标（调用次数≈rewrite_count+1、重写轮次、检测分演变）
+    logger.info(
+        "comment pipeline done sub=%s risk=%s rewrites=%d",
+        subreddit,
+        risk,
+        rewrites,
+        extra={
+            "event": "ai_pipeline",
+            "site_id": site_id,
+            "detail": {
+                "content_type": "comment",
+                "subreddit": subreddit,
+                "risk": risk,
+                "rewrite_count": rewrites,
+                "score_before_humanize": score_before,
+                "score_after_humanize": score_after,
+                "brand_leak_hits": brand_hits,
+            },
+        },
+    )
     return GeneratedComment(
         body=body,
         ai_risk=risk,
@@ -290,6 +310,25 @@ def generate_post_pipeline(
         risk = "likely_ai"
         revision_notes = build_revision_notes(after)
 
+    # 阶段 0 埋点：AI 流水线整趟指标（调用次数≈rewrite_count+1、重写轮次、检测分演变）
+    logger.info(
+        "post pipeline done sub=%s risk=%s rewrites=%d",
+        subreddit,
+        risk,
+        rewrites,
+        extra={
+            "event": "ai_pipeline",
+            "site_id": site_id,
+            "detail": {
+                "content_type": "post",
+                "subreddit": subreddit,
+                "risk": risk,
+                "rewrite_count": rewrites,
+                "score_before_humanize": score_before,
+                "score_after_humanize": score_after,
+            },
+        },
+    )
     return GeneratedPost(
         title=title,
         body=body,
@@ -337,7 +376,7 @@ def generate_post_content(
         _rules_text_for_subreddit,
         _site_url_from_domain,
     )
-    from app.models.reddit import RedditBrand, RedditPost, RedditProduct, RedditProductKeyword
+    from app.models.reddit import RedditBrand, RedditPost, RedditProduct
     from app.services.ai_writer import get_ai_client
     from app.services.reddit_client import get_reddit_client_for_account, normalize_subreddit
     from app.services.reddit_community_rotation import (

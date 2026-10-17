@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from app.core.timeutil import now_bj
 
+import sqlalchemy as sa
 from sqlalchemy import (
     Boolean,
     Column,
@@ -357,6 +358,8 @@ class RedditCampaign(Base):
     product_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("reddit_products.id"), nullable=True
     )
+    # 配置版本：PATCH 更新配置时递增；动作规划时快照到动作行，执行前校验
+    config_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     last_tick_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_bj, nullable=False
@@ -367,7 +370,13 @@ class RedditCampaign(Base):
 
 
 class RedditCampaignAction(Base):
-    """Campaign 动作执行记录：计划 → 执行 → 结果，含防重 dedup_key。"""
+    """Campaign 动作执行记录：计划 → 执行 → 结果，含防重 dedup_key。
+
+    状态机（阶段 1 扩展）：pending / executing / done / failed / skipped /
+    reconciling（外部结果待核实）/ needs_review（自动恢复不安全，转人工）。
+    生成与执行是双轴生命周期：status 管执行，generation_status 管生成
+    （阶段 2 启用，阶段 1 默认 not_required）。
+    """
 
     __tablename__ = "reddit_campaign_actions"
     __table_args__ = (
@@ -380,6 +389,33 @@ class RedditCampaignAction(Base):
             "planned_at",
         ),
         Index("ix_campaign_actions_campaign_planned", "campaign_id", "planned_at"),
+        # 僵尸回收 / 对账扫描：仅执行中的行（部分索引）
+        Index(
+            "ix_campaign_actions_status_lease_until",
+            "status",
+            "lease_until",
+            postgresql_where=sa.text("status IN ('executing', 'reconciling')"),
+        ),
+        # 执行发放扫描（due_upvote_action_ids / claim_due_actions_batch）：
+        # 仅 pending 点赞（r023 部分索引；负载测试实测 42k 行上全 planned_at
+        # 索引需过滤 30k 行，部分索引精确命中 due 集合）
+        Index(
+            "ix_campaign_actions_due_dispatch",
+            "planned_at",
+            postgresql_where=sa.text(
+                "status = 'pending' AND action_type IN ('upvote_related', 'upvote_self')"
+            ),
+        ),
+        # 生成心跳重投扫描（requeue_stale_generation_actions）：仅 pending 内容骨架
+        # 的 queued/generating 行（r023 部分索引）
+        Index(
+            "ix_campaign_actions_gen_requeue",
+            "planned_at",
+            postgresql_where=sa.text(
+                "status = 'pending' AND action_type IN ('post', 'comment') "
+                "AND generation_status IN ('queued', 'generating')"
+            ),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -394,7 +430,7 @@ class RedditCampaignAction(Base):
     )
     # post / comment / upvote_related / upvote_self
     action_type: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
-    # pending / executing / done / failed / skipped
+    # pending / executing / done / failed / skipped / reconciling / needs_review
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
     planned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
@@ -412,6 +448,76 @@ class RedditCampaignAction(Base):
     skip_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # 防重复计划：post:{campaign}:{account}:{yyyymmdd} / upvote:{account}:{thing} / upvote_self:{voter}:{post}
     dedup_key: Mapped[str] = mapped_column(String(150), nullable=False)
+    # ---- 阶段 1 可靠性：租约 / fencing 代次 / 协议列 ----
+    # 执行租约持有者（观测用；终态回写校验以代次为准，worker 身份可能被复用）
+    lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 两阶段独立 fencing 代次：各自领取 +1，续租/终态回写必须校验所属阶段代次
+    execution_lease_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    generation_lease_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 执行租约到期时刻（僵尸回收按此判定，替代 updated_at 时间推断）
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 投递可用时刻（重试退避 / 到期调度）
+    available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 生成生命周期：not_required / queued / generating / ready / failed（阶段 2 启用）
+    generation_status: Mapped[str] = mapped_column(
+        String(20), default="not_required", nullable=False
+    )
+    # 按阶段独立尝试计数与重试预算（生成重试不占执行预算）
+    generation_attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    execution_attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    generation_max_attempts: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    execution_max_attempts: Mapped[int] = mapped_column(Integer, default=2, nullable=False)
+    # 外部结果分类：confirmed_success / confirmed_absent / unknown / config_version_mismatch
+    result_status: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # 错误分类码：retryable_rate_limit / request_unknown / paused_before_request / ...
+    last_error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # 暂停/取消协议：暂停时对在途动作打取消请求时刻（执行前校验点据此停止）
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 规划时快照的 campaign 配置版本（执行前校验）
+    config_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    # 生成上下文快照（JSON 字符串）：评论候选 {url, thing_id, title, body, subreddit,
+    # keyword} 随骨架持久化，generation 队列任务免重复抓取；帖子上下文全可重推导，为空
+    generation_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_bj, onupdate=now_bj, nullable=False
+    )
+
+
+class RedditCampaignActionAttempt(Base):
+    """动作尝试审计（两段持久化）：领取事务预写 request_pending，终态事务回写 responded。
+
+    恢复程序依据：attempt_no 对应当前租约代次；request_started_at 非空表示外部请求
+    已开始发出——worker 在请求发出后、响应回写前崩溃时据此进入 reconciling，
+    而非凭时间推断盲目重试。
+    """
+
+    __tablename__ = "reddit_campaign_action_attempts"
+    __table_args__ = (
+        UniqueConstraint("action_id", "phase", "attempt_no", name="uq_campaign_action_attempt"),
+        Index("ix_campaign_attempts_action_phase", "action_id", "phase"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    action_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("reddit_campaign_actions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # generation / execution
+    phase: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 该动作该阶段内序号（执行阶段与 execution_lease_generation 同步递增）
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    # request_pending（预写，请求尚未发出）→ responded（终态回写）
+    request_state: Mapped[str] = mapped_column(String(20), nullable=False)
+    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    request_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 外部对象 ID（thing_id / 外部请求标识，供对账直查核实）
+    external_object_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    result_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_bj, nullable=False
     )

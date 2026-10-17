@@ -117,10 +117,21 @@ log "启动 Celery worker / beat ..."
 # 单容器部署没有外部进程管理器，裸 & 启动的子进程死亡后无人恢复——
 # 表现为排期照常生成、到期动作永远不执行（执行链路静默停摆）。
 # 输出不重定向，保持容器 stdout 可见（魔搭日志页）。
+# generation 独立 worker（阶段 2）：AI 生成出环，长任务不占执行/tick 窗口。
+# 并发定型（阶段 4 压测）：魔搭单站点受 DeepSeek 配额（40 内容/天）与账号配额
+# 约束，峰值到达率 << 0.2 动作/s → social/default 并发 2、generation 并发 1
+# 足够；prod 拓扑（docker-compose.prod.yml）为 4+2，扩容依据见该文件注释。
 (
   while true; do
-    celery -A app.core.celery_app worker -Q default,serp,social --loglevel=INFO --concurrency=2
+    celery -A app.core.celery_app worker -Q default,serp,social,maintenance --loglevel=INFO --concurrency=2
     echo "[start] Celery worker exited, restarting in 5s ..."
+    sleep 5
+  done
+) &
+(
+  while true; do
+    celery -A app.core.celery_app worker -Q generation --loglevel=INFO --concurrency=1
+    echo "[start] Celery generation worker exited, restarting in 5s ..."
     sleep 5
   done
 ) &

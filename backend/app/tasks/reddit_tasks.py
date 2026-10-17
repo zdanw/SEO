@@ -8,11 +8,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from app.core.timeutil import as_bj_naive, now_bj
 
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
@@ -21,6 +21,7 @@ from app.core.database import SessionLocal
 from app.models.reddit import (
     RedditAccountProfile,
     RedditCampaign,
+    RedditCampaignAction,
     RedditComment,
     RedditPost,
     RedditPostMetric,
@@ -30,6 +31,7 @@ from app.services.reddit_publish import (
     publish_post_now,
     recover_stale_posting,
 )
+from app.services.reddit_campaign import revalidate_campaign_content_config
 from app.services.reddit_risk import (
     clear_warning,
     ensure_karma_stage_consistency,
@@ -287,14 +289,20 @@ def publish_scheduled_reddit_content() -> dict:
     skipped_comments = 0
     try:
         now = now_bj()
-        # campaign 内容仅在其 campaign 处于 running 时发放（暂停/结束即停）；普通内容（campaign_id 为空）不受影响
+        # campaign 内容仅在其 campaign 处于 running 且生成已完成（generation ready）时
+        # 发放（暂停/结束/生成中即停）；普通内容（campaign_id 为空）不受影响。
+        # 关联条件按业务 ID（post_id/comment_id）：同一内容只挂一条骨架动作。
         _campaign_gate = or_(
             RedditPost.campaign_id.is_(None),
-            RedditCampaign.status == "running",
+            and_(
+                RedditCampaign.status == "running",
+                RedditCampaignAction.generation_status == "ready",
+            ),
         )
         posts = (
             db.query(RedditPost.id)
             .outerjoin(RedditCampaign, RedditPost.campaign_id == RedditCampaign.id)
+            .outerjoin(RedditCampaignAction, RedditCampaignAction.post_id == RedditPost.id)
             .filter(
                 RedditPost.status == "approved",
                 RedditPost.scheduled_at.isnot(None),
@@ -308,6 +316,10 @@ def publish_scheduled_reddit_content() -> dict:
             if _ai_recheck_blocks(db, kind="post", item_id=post_id):
                 skipped_posts += 1
                 continue
+            # config_version 门控（阶段 3）：配置变更后已失效的内容与动作同步作废
+            if not revalidate_campaign_content_config(db, kind="post", item_id=post_id):
+                skipped_posts += 1
+                continue
             if try_enqueue_publish("post", post_id, publish_reddit_post_by_id):
                 queued_posts += 1
             else:
@@ -315,11 +327,15 @@ def publish_scheduled_reddit_content() -> dict:
 
         _campaign_gate_c = or_(
             RedditComment.campaign_id.is_(None),
-            RedditCampaign.status == "running",
+            and_(
+                RedditCampaign.status == "running",
+                RedditCampaignAction.generation_status == "ready",
+            ),
         )
         comments = (
             db.query(RedditComment.id)
             .outerjoin(RedditCampaign, RedditComment.campaign_id == RedditCampaign.id)
+            .outerjoin(RedditCampaignAction, RedditCampaignAction.comment_id == RedditComment.id)
             .filter(
                 RedditComment.status == "approved",
                 RedditComment.scheduled_at.isnot(None),
@@ -331,6 +347,10 @@ def publish_scheduled_reddit_content() -> dict:
         )
         for (comment_id,) in comments:
             if _ai_recheck_blocks(db, kind="comment", item_id=comment_id):
+                skipped_comments += 1
+                continue
+            # config_version 门控（阶段 3）：同上
+            if not revalidate_campaign_content_config(db, kind="comment", item_id=comment_id):
                 skipped_comments += 1
                 continue
             if try_enqueue_publish("comment", comment_id, publish_reddit_comment_by_id):

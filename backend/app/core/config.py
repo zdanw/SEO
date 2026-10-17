@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
     SECRET_KEY: str = "change-me-in-production-please-123456"
+    # 静态加密密钥（数据库内第三方凭证等敏感字段）：不设则从 SECRET_KEY 派生。
+    # 轮换 SECRET_KEY 前必须先固化独立 ENCRYPTION_KEY，否则存量密文将不可解
+    ENCRYPTION_KEY: str = ""
     API_V1_PREFIX: str = "/api/v1"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24h
     ALLOW_REGISTRATION: bool = False
@@ -115,6 +118,13 @@ class Settings(BaseSettings):
     REDDIT_CLIENT_SECRET: Optional[str] = None
     REDDIT_USER_AGENT: str = "web:seo-ops:1.0.0 (by /u/seo_ops_local)"
 
+    # Campaign 数据保留（阶段 3）：终态动作 12 个月 / 尝试审计 6 个月；0 = 永久保留
+    CAMPAIGN_ACTION_RETENTION_DAYS: int = 365
+    CAMPAIGN_ATTEMPT_RETENTION_DAYS: int = 180
+    # 短窗口滚动规划（阶段 3）：生成仅在计划执行时刻前该窗口内触发，
+    # 减少暂停/改配置后已生成内容作废浪费的 AI 配额；0 = 关闭（规划后立即生成）
+    CAMPAIGN_GENERATION_LEAD_MINUTES: int = 240
+
     @property
     def is_dev(self) -> bool:
         return self.APP_ENV.lower() in ("dev", "development", "local")
@@ -157,6 +167,11 @@ class Settings(BaseSettings):
         key = self.SECRET_KEY or ""
         if len(key) < 32 or any(m in key.lower() for m in _WEAK_SECRET_MARKERS):
             errors.append("生产环境须设置长度≥32 且非默认占位符的 SECRET_KEY")
+
+        # 静态加密密钥：未设置时从 SECRET_KEY 派生（不阻断，兼容存量部署）；设置了则要求强度
+        enc_key = self.ENCRYPTION_KEY or ""
+        if enc_key and (len(enc_key) < 32 or any(m in enc_key.lower() for m in _WEAK_SECRET_MARKERS)):
+            errors.append("生产环境 ENCRYPTION_KEY 须为长度≥32 且非默认占位符的强密钥")
 
         # 数据库凭证：database.py 只消费 DATABASE_URL，连接串内密码是唯一生效凭证；
         # DB_PASSWORD 仅在未覆盖 DATABASE_URL（按 DB_* 装配默认连接串）时参与校验。
