@@ -47,6 +47,11 @@ def upgrade() -> None:
     )
 
     # ---- reddit_campaign_actions: 租约 / 代次 / 计数 / 协议列 ----
+    # 规划时快照，执行前与 campaign.config_version 比对做配置失效分级
+    op.add_column(
+        "reddit_campaign_actions",
+        sa.Column("config_version", sa.Integer(), nullable=False, server_default="1"),
+    )
     op.add_column(
         "reddit_campaign_actions",
         sa.Column("lease_owner", sa.String(length=64), nullable=True),
@@ -178,6 +183,7 @@ def downgrade() -> None:
         "ix_campaign_actions_status_lease_until", table_name="reddit_campaign_actions"
     )
     for col in (
+        "config_version",
         "cancel_requested_at",
         "last_error_code",
         "result_status",
